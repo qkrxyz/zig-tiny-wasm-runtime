@@ -53,13 +53,13 @@ pub const TypeStack = struct {
             try self.pushValueType(v);
     }
 
-    pub fn pop(self: *Self) error{TypeMismatch}!ValidationType {
+    pub fn pop(self: *Self) !ValidationType {
         if (self.isEmpty())
             return Error.TypeMismatch;
         return self.array.pop().?;
     }
 
-    pub fn polymophicPop(self: *Self) error{TypeMismatch}!ValidationType {
+    pub fn polymophicPop(self: *Self) !ValidationType {
         if (self.polymophic and self.isEmpty())
             return .any;
         return try self.pop();
@@ -74,7 +74,7 @@ pub const TypeStack = struct {
         self.polymophic = true;
     }
 
-    pub fn popWithChecking(self: *Self, expected_validate_type: ValidationType) error{TypeMismatch}!void {
+    pub fn popWithChecking(self: *Self, expected_validate_type: ValidationType) !void {
         if (self.polymophic and self.isEmpty())
             return;
 
@@ -83,11 +83,11 @@ pub const TypeStack = struct {
             return Error.TypeMismatch;
     }
 
-    pub fn popWithCheckingValueType(self: *Self, expected_value_type: ValueType) error{TypeMismatch}!void {
+    pub fn popWithCheckingValueType(self: *Self, expected_value_type: ValueType) !void {
         try self.popWithChecking(validationTypeFromValueType(expected_value_type));
     }
 
-    pub fn popValuesWithCheckingValueType(self: *Self, expected_value_types: []const ValueType) error{TypeMismatch}!void {
+    pub fn popValuesWithCheckingValueType(self: *Self, expected_value_types: []const ValueType) !void {
         var i = expected_value_types.len;
         while (i > 0) : (i -= 1) {
             try self.popWithCheckingValueType(expected_value_types[i - 1]);

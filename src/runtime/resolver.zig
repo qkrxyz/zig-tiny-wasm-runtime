@@ -30,21 +30,25 @@ pub fn resolveImports(store: Store, mod_insts: Engine.ModuleInstMap, module: Mod
     return external_imports;
 }
 
-fn findExportFromModules(mod_insts: Engine.ModuleInstMap, module_name: []const u8, import_name: []const u8) error{UnknownImport}!ExternalValue {
+fn findExportFromModules(
+    mod_insts: Engine.ModuleInstMap,
+    module_name: []const u8,
+    import_name: []const u8,
+) !ExternalValue {
     if (mod_insts.get(module_name)) |mod_inst| {
         return try findExport(mod_inst.*, import_name);
     } else {
         std.debug.print("Unknown import: {s}.{s}\n", .{ module_name, import_name });
-        return Error.UnknownImport;
+        return error.UnknownImport;
     }
 }
 
-pub fn findExport(mod_inst: ModuleInst, import_name: []const u8) error{UnknownImport}!ExternalValue {
+pub fn findExport(mod_inst: ModuleInst, import_name: []const u8) !ExternalValue {
     for (mod_inst.exports) |exp| {
         if (std.mem.eql(u8, import_name, exp.name))
             return exp.value;
     }
-    return Error.UnknownImport;
+    return error.UnknownImport;
 }
 
 fn isMatchType(store: Store, exp: ExternalValue, module: Module, imp: ImportDesc) bool {

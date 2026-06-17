@@ -2,7 +2,6 @@ const std = @import("std");
 const wasm_core = @import("wasm-core");
 const lexer_mod = @import("./lexer.zig");
 const spec_types = @import("spec-types");
-const numeric_parser = @import("./numeric_parser.zig");
 
 pub const Lexer = lexer_mod.Lexer;
 pub const Token = lexer_mod.Token;
@@ -31,22 +30,22 @@ pub const ModuleBuilder = struct {
     pub fn init(allocator: std.mem.Allocator) ModuleBuilder {
         return ModuleBuilder{
             .allocator = allocator,
-            .types = std.ArrayList(wasm_core.types.FuncType){},
-            .funcs = std.ArrayList(wasm_core.types.Func){},
-            .tables = std.ArrayList(wasm_core.types.TableType){},
-            .memories = std.ArrayList(wasm_core.types.MemoryType){},
-            .globals = std.ArrayList(wasm_core.types.Global){},
-            .elements = std.ArrayList(wasm_core.types.Element){},
-            .datas = std.ArrayList(wasm_core.types.Data){},
+            .types = std.ArrayList(wasm_core.types.FuncType).empty,
+            .funcs = std.ArrayList(wasm_core.types.Func).empty,
+            .tables = std.ArrayList(wasm_core.types.TableType).empty,
+            .memories = std.ArrayList(wasm_core.types.MemoryType).empty,
+            .globals = std.ArrayList(wasm_core.types.Global).empty,
+            .elements = std.ArrayList(wasm_core.types.Element).empty,
+            .datas = std.ArrayList(wasm_core.types.Data).empty,
             .start = null,
-            .imports = std.ArrayList(wasm_core.types.Import){},
-            .exports = std.ArrayList(wasm_core.types.Export){},
+            .imports = std.ArrayList(wasm_core.types.Import).empty,
+            .exports = std.ArrayList(wasm_core.types.Export).empty,
             .func_names = std.StringHashMap(u32).init(allocator),
             .memory_names = std.StringHashMap(u32).init(allocator),
             .type_names = std.StringHashMap(u32).init(allocator),
             .global_names = std.StringHashMap(u32).init(allocator),
             .table_names = std.StringHashMap(u32).init(allocator),
-            .tags = std.ArrayList(wasm_core.types.Tag){},
+            .tags = std.ArrayList(wasm_core.types.Tag).empty,
             .tag_names = std.StringHashMap(u32).init(allocator),
         };
     }
@@ -200,7 +199,7 @@ pub const Parser = struct {
             .allocator = allocator,
             .input = input,
             .local_names = std.StringHashMap(u32).init(allocator),
-            .label_stack = std.ArrayList(?[]const u8){},
+            .label_stack = std.ArrayList(?[]const u8).empty,
             .builder = builder,
         };
     }
@@ -239,17 +238,17 @@ pub const Parser = struct {
         const saved_token = self.current_token;
         const saved_line = self.lexer.line;
 
-        var type_entries = std.ArrayList(PreScanEntry){};
+        var type_entries = std.ArrayList(PreScanEntry).empty;
         defer type_entries.deinit(self.allocator);
-        var func_entries = std.ArrayList(PreScanEntry){};
+        var func_entries = std.ArrayList(PreScanEntry).empty;
         defer func_entries.deinit(self.allocator);
-        var table_entries = std.ArrayList(PreScanEntry){};
+        var table_entries = std.ArrayList(PreScanEntry).empty;
         defer table_entries.deinit(self.allocator);
-        var memory_entries = std.ArrayList(PreScanEntry){};
+        var memory_entries = std.ArrayList(PreScanEntry).empty;
         defer memory_entries.deinit(self.allocator);
-        var global_entries = std.ArrayList(PreScanEntry){};
+        var global_entries = std.ArrayList(PreScanEntry).empty;
         defer global_entries.deinit(self.allocator);
-        var tag_entries = std.ArrayList(PreScanEntry){};
+        var tag_entries = std.ArrayList(PreScanEntry).empty;
         defer tag_entries.deinit(self.allocator);
 
         // Scan all top-level fields: (field_name ...)
@@ -802,7 +801,7 @@ pub const Parser = struct {
         }
 
         // Parse function references
-        var init_list = std.ArrayList(wasm_core.types.InitExpression){};
+        var init_list = std.ArrayList(wasm_core.types.InitExpression).empty;
         defer init_list.deinit(self.allocator);
 
         while (self.current_token != .right_paren and self.current_token != .eof) {
@@ -920,9 +919,9 @@ pub const Parser = struct {
         }
         try self.advance();
 
-        var params: std.ArrayList(wasm_core.types.ValueType) = .{};
+        var params: std.ArrayList(wasm_core.types.ValueType) = .empty;
         defer params.deinit(self.allocator);
-        var results: std.ArrayList(wasm_core.types.ValueType) = .{};
+        var results: std.ArrayList(wasm_core.types.ValueType) = .empty;
         defer results.deinit(self.allocator);
 
         // Parse (param ...) and (result ...)
@@ -1248,7 +1247,7 @@ pub const Parser = struct {
         }
 
         // Parse (param ...) to build func type with empty results
-        var param_types = std.ArrayList(wasm_core.types.ValueType){};
+        var param_types = std.ArrayList(wasm_core.types.ValueType).empty;
         defer param_types.deinit(self.allocator);
         while (self.current_token == .left_paren) {
             const saved_pos = self.lexer.pos;
@@ -1370,9 +1369,9 @@ pub const Parser = struct {
                 }
             } else {
                 // No explicit type — parse param/result to determine function type
-                var import_params: std.ArrayList(wasm_core.types.ValueType) = .{};
+                var import_params: std.ArrayList(wasm_core.types.ValueType) = .empty;
                 defer import_params.deinit(self.allocator);
-                var import_results: std.ArrayList(wasm_core.types.ValueType) = .{};
+                var import_results: std.ArrayList(wasm_core.types.ValueType) = .empty;
                 defer import_results.deinit(self.allocator);
 
                 while (self.current_token == .left_paren) {
@@ -1485,7 +1484,7 @@ pub const Parser = struct {
             var table_is_64 = false;
             if (self.current_token == .identifier and
                 (std.mem.eql(u8, self.current_token.identifier, "i32") or
-                std.mem.eql(u8, self.current_token.identifier, "i64")))
+                    std.mem.eql(u8, self.current_token.identifier, "i64")))
             {
                 table_is_64 = std.mem.eql(u8, self.current_token.identifier, "i64");
                 try self.advance();
@@ -1539,7 +1538,7 @@ pub const Parser = struct {
             var memory_is_64 = false;
             if (self.current_token == .identifier and
                 (std.mem.eql(u8, self.current_token.identifier, "i32") or
-                std.mem.eql(u8, self.current_token.identifier, "i64")))
+                    std.mem.eql(u8, self.current_token.identifier, "i64")))
             {
                 memory_is_64 = std.mem.eql(u8, self.current_token.identifier, "i64");
                 try self.advance();
@@ -1617,7 +1616,7 @@ pub const Parser = struct {
                 var import_is_64 = false;
                 if (self.current_token == .identifier and
                     (std.mem.eql(u8, self.current_token.identifier, "i32") or
-                    std.mem.eql(u8, self.current_token.identifier, "i64")))
+                        std.mem.eql(u8, self.current_token.identifier, "i64")))
                 {
                     import_is_64 = std.mem.eql(u8, self.current_token.identifier, "i64");
                     try self.advance();
@@ -1740,7 +1739,7 @@ pub const Parser = struct {
                 var export_import_is_64 = false;
                 if (self.current_token == .identifier and
                     (std.mem.eql(u8, self.current_token.identifier, "i32") or
-                    std.mem.eql(u8, self.current_token.identifier, "i64")))
+                        std.mem.eql(u8, self.current_token.identifier, "i64")))
                 {
                     export_import_is_64 = std.mem.eql(u8, self.current_token.identifier, "i64");
                     try self.advance();
@@ -1817,7 +1816,7 @@ pub const Parser = struct {
         var local_is_64 = false;
         if (self.current_token == .identifier and
             (std.mem.eql(u8, self.current_token.identifier, "i32") or
-            std.mem.eql(u8, self.current_token.identifier, "i64")))
+                std.mem.eql(u8, self.current_token.identifier, "i64")))
         {
             local_is_64 = std.mem.eql(u8, self.current_token.identifier, "i64");
             try self.advance();
@@ -1870,7 +1869,7 @@ pub const Parser = struct {
                 try self.advance();
 
                 // Parse element initializers
-                var init_list = std.ArrayList(wasm_core.types.InitExpression){};
+                var init_list = std.ArrayList(wasm_core.types.InitExpression).empty;
                 defer init_list.deinit(self.allocator);
 
                 while (self.current_token != .right_paren and self.current_token != .eof) {
@@ -1949,7 +1948,7 @@ pub const Parser = struct {
                 return;
             } else if (self.current_token == .identifier and
                 (std.mem.eql(u8, self.current_token.identifier, "ref") or
-                std.mem.eql(u8, self.current_token.identifier, "ref.null")))
+                    std.mem.eql(u8, self.current_token.identifier, "ref.null")))
             {
                 // (ref null func) or (ref.null func)
                 const is_combined_ref_null = std.mem.eql(u8, self.current_token.identifier, "ref.null");
@@ -2170,7 +2169,7 @@ pub const Parser = struct {
                 var is_64 = false;
                 if (self.current_token == .identifier and
                     (std.mem.eql(u8, self.current_token.identifier, "i32") or
-                    std.mem.eql(u8, self.current_token.identifier, "i64")))
+                        std.mem.eql(u8, self.current_token.identifier, "i64")))
                 {
                     is_64 = std.mem.eql(u8, self.current_token.identifier, "i64");
                     try self.advance();
@@ -2262,7 +2261,7 @@ pub const Parser = struct {
                 try self.advance(); // consume 'data'
 
                 // Parse data strings
-                var data_list: std.ArrayList(u8) = .{};
+                var data_list: std.ArrayList(u8) = .empty;
                 defer data_list.deinit(self.allocator);
                 while (self.current_token == .string) {
                     const unescaped = try self.unescapeString(self.current_token.string);
@@ -2438,7 +2437,7 @@ pub const Parser = struct {
         }
 
         // Parse data strings (can be multiple)
-        var data_list: std.ArrayList(u8) = .{};
+        var data_list: std.ArrayList(u8) = .empty;
         defer data_list.deinit(self.allocator);
 
         while (self.current_token == .string) {
@@ -2460,7 +2459,7 @@ pub const Parser = struct {
     }
 
     fn unescapeString(self: *Parser, input: []const u8) ![]const u8 {
-        var result: std.ArrayList(u8) = .{};
+        var result: std.ArrayList(u8) = .empty;
         var i: usize = 0;
         while (i < input.len) : (i += 1) {
             if (input[i] == '\\' and i + 1 < input.len) {
@@ -2508,13 +2507,13 @@ pub const Parser = struct {
 
         var func_name: ?[]const u8 = null;
         var export_name: ?[]const u8 = null;
-        var params: std.ArrayList(wasm_core.types.ValueType) = .{};
+        var params: std.ArrayList(wasm_core.types.ValueType) = .empty;
         defer params.deinit(self.allocator);
-        var results: std.ArrayList(wasm_core.types.ValueType) = .{};
+        var results: std.ArrayList(wasm_core.types.ValueType) = .empty;
         defer results.deinit(self.allocator);
-        var locals: std.ArrayList(wasm_core.types.ValueType) = .{};
+        var locals: std.ArrayList(wasm_core.types.ValueType) = .empty;
         defer locals.deinit(self.allocator);
-        var instructions: std.ArrayList(wasm_core.types.Instruction) = .{};
+        var instructions: std.ArrayList(wasm_core.types.Instruction) = .empty;
         defer instructions.deinit(self.allocator);
 
         // Check for function name ($name)
@@ -2901,8 +2900,7 @@ pub const Parser = struct {
         } else if (std.mem.eql(u8, type_name, "nullref")) blk: {
             self.last_ref_type_ext = .{ .heap_type = .extern_ht, .nullable = true };
             break :blk .extern_ref;
-        } else
-            return null;
+        } else return null;
 
         try self.advance();
         return vtype;
@@ -2956,7 +2954,7 @@ pub const Parser = struct {
         }
 
         // Parse zero or more (param ...) clauses
-        var param_types = std.ArrayList(wasm_core.types.ValueType){};
+        var param_types = std.ArrayList(wasm_core.types.ValueType).empty;
         defer param_types.deinit(self.allocator);
 
         while (self.current_token == .left_paren) {
@@ -2991,7 +2989,7 @@ pub const Parser = struct {
         }
 
         // Parse zero or more (result ...) clauses
-        var result_types = std.ArrayList(wasm_core.types.ValueType){};
+        var result_types = std.ArrayList(wasm_core.types.ValueType).empty;
         defer result_types.deinit(self.allocator);
 
         while (self.current_token == .left_paren) {
@@ -3092,7 +3090,7 @@ pub const Parser = struct {
             return .{ .i64_const = 0 };
         } else if (std.mem.eql(u8, instr_name, "f32.const")) {
             if (self.current_token == .number) {
-                const val = try numeric_parser.parseFloat(f32, self.current_token.number);
+                const val = try std.fmt.parseFloat(f32, self.current_token.number);
                 try self.advance();
                 try self.expectRightParen();
                 return .{ .f32_const = val };
@@ -3101,7 +3099,7 @@ pub const Parser = struct {
             return .{ .f32_const = 0.0 };
         } else if (std.mem.eql(u8, instr_name, "f64.const")) {
             if (self.current_token == .number) {
-                const val = try numeric_parser.parseFloat(f64, self.current_token.number);
+                const val = try std.fmt.parseFloat(f64, self.current_token.number);
                 try self.advance();
                 try self.expectRightParen();
                 return .{ .f64_const = val };
@@ -3155,7 +3153,7 @@ pub const Parser = struct {
         {
             // Operands are inside this paren — parseInitExpression reads until ')'
             const sub_expr = try self.parseInitExpression();
-            var instrs = std.ArrayList(wasm_core.types.Instruction){};
+            var instrs = std.ArrayList(wasm_core.types.Instruction).empty;
             defer instrs.deinit(self.allocator);
             // Flatten sub-expression
             switch (sub_expr) {
@@ -3203,7 +3201,7 @@ pub const Parser = struct {
 
     /// Parse init expression for globals, data, and element offsets (greedy — consumes all expressions)
     fn parseInitExpression(self: *Parser) !wasm_core.types.InitExpression {
-        var instrs = std.ArrayList(wasm_core.types.Instruction){};
+        var instrs = std.ArrayList(wasm_core.types.Instruction).empty;
         defer instrs.deinit(self.allocator);
 
         // Parse instructions until we hit right paren or string
@@ -3230,14 +3228,14 @@ pub const Parser = struct {
                         try self.expectRightParen();
                     } else if (std.mem.eql(u8, instr_name, "f32.const")) {
                         if (self.current_token == .number) {
-                            const val = try numeric_parser.parseFloat(f32, self.current_token.number);
+                            const val = try std.fmt.parseFloat(f32, self.current_token.number);
                             try instrs.append(self.allocator, .{ .f32_const = val });
                             try self.advance();
                         }
                         try self.expectRightParen();
                     } else if (std.mem.eql(u8, instr_name, "f64.const")) {
                         if (self.current_token == .number) {
-                            const val = try numeric_parser.parseFloat(f64, self.current_token.number);
+                            const val = try std.fmt.parseFloat(f64, self.current_token.number);
                             try instrs.append(self.allocator, .{ .f64_const = val });
                             try self.advance();
                         }
@@ -3356,7 +3354,7 @@ pub const Parser = struct {
 
     /// Fix block/loop/if end positions after parsing
     fn fixBlockEnds(self: *Parser, instructions: []wasm_core.types.Instruction) !void {
-        var nested_blocks = std.ArrayList(u32){};
+        var nested_blocks = std.ArrayList(u32).empty;
         defer nested_blocks.deinit(self.allocator);
 
         for (instructions, 0..) |*inst, i| {
@@ -3366,7 +3364,7 @@ pub const Parser = struct {
                 try nested_blocks.append(self.allocator, pos);
             } else if (inst.* == .@"else") {
                 if (nested_blocks.items.len > 0) {
-                    const idx = nested_blocks.getLast();
+                    const idx = nested_blocks.getLast().?;
                     if (instructions[idx] == .@"if") {
                         instructions[idx].@"if".@"else" = pos;
                     }
@@ -3514,7 +3512,7 @@ pub const Parser = struct {
                 _ = try self.parseOptionalName();
                 const block_type = try self.parseBlockType();
                 // Parse catch clauses
-                var catches = std.ArrayList(wasm_core.Instruction.CatchClause){};
+                var catches = std.ArrayList(wasm_core.Instruction.CatchClause).empty;
                 while (self.current_token == .left_paren) {
                     // Save state to check for catch keyword
                     const saved_pos = self.lexer.pos;
@@ -3569,7 +3567,7 @@ pub const Parser = struct {
             .br_if => return .{ .br_if = try self.parseLabelIndex() },
             .br_table => {
                 // Parse br_table: (br_table label1 label2 ... default)
-                var label_idxs = std.ArrayList(u32){};
+                var label_idxs = std.ArrayList(u32).empty;
                 defer label_idxs.deinit(self.allocator);
 
                 // Parse all label indices (last one is the default)
@@ -3611,7 +3609,7 @@ pub const Parser = struct {
                         // It's (result ...), parse typed select
                         try self.advance(); // consume 'result'
 
-                        var types = std.ArrayList(wasm_core.types.ValueType){};
+                        var types = std.ArrayList(wasm_core.types.ValueType).empty;
                         defer types.deinit(self.allocator);
 
                         while (self.current_token != .right_paren and self.current_token != .eof) {
@@ -3636,7 +3634,7 @@ pub const Parser = struct {
             },
             .selectv => {
                 // Parse types for selectv
-                var types = std.ArrayList(wasm_core.types.ValueType){};
+                var types = std.ArrayList(wasm_core.types.ValueType).empty;
                 defer types.deinit(self.allocator);
 
                 while (self.current_token != .right_paren and self.current_token != .eof) {
@@ -3699,7 +3697,7 @@ pub const Parser = struct {
                             try self.advance(); // consume '('
                             if (self.current_token == .identifier and
                                 (std.mem.eql(u8, self.current_token.identifier, "param") or
-                                std.mem.eql(u8, self.current_token.identifier, "result")))
+                                    std.mem.eql(u8, self.current_token.identifier, "result")))
                             {
                                 // Skip to closing paren
                                 try self.advance(); // consume 'param'/'result'
@@ -3877,7 +3875,7 @@ pub const Parser = struct {
                 if (self.current_token != .number) {
                     return TextDecodeError.InvalidNumber;
                 }
-                const val = try numeric_parser.parseInteger(i32, self.current_token.number);
+                const val = try std.fmt.parseInt(i32, self.current_token.number, 0);
                 try self.advance();
                 return .{ .i32_const = val };
             },
@@ -3885,7 +3883,7 @@ pub const Parser = struct {
                 if (self.current_token != .number) {
                     return TextDecodeError.InvalidNumber;
                 }
-                const val = try numeric_parser.parseInteger(i64, self.current_token.number);
+                const val = try std.fmt.parseInt(i64, self.current_token.number, 0);
                 try self.advance();
                 return .{ .i64_const = val };
             },
@@ -4850,7 +4848,7 @@ pub const Parser = struct {
 
             if (self.current_token == .identifier and
                 (std.mem.startsWith(u8, self.current_token.identifier, "offset=") or
-                std.mem.startsWith(u8, self.current_token.identifier, "align=")))
+                    std.mem.startsWith(u8, self.current_token.identifier, "align=")))
             {
                 // Followed by memarg keywords -> this number is mem_idx
                 mem_idx = potential_idx;
@@ -4934,7 +4932,7 @@ pub const Parser = struct {
         else
             return TextDecodeError.InvalidNumber;
 
-        const val = try numeric_parser.parseFloat(T, input);
+        const val = try std.fmt.parseFloat(T, input);
         try self.advance();
         return val;
     }
@@ -4951,13 +4949,13 @@ pub const Parser = struct {
 
         if (std.mem.eql(u8, shape, "i8x16")) {
             for (0..16) |i| {
-                const val = try numeric_parser.parseInteger(i8, self.current_token.number);
+                const val = try std.fmt.parseInt(i8, self.current_token.number, 0);
                 bytes[i] = @bitCast(val);
                 try self.advance();
             }
         } else if (std.mem.eql(u8, shape, "i16x8")) {
             for (0..8) |i| {
-                const val = try numeric_parser.parseInteger(i16, self.current_token.number);
+                const val = try std.fmt.parseInt(i16, self.current_token.number, 0);
                 const val_bytes: [2]u8 = @bitCast(val);
                 bytes[i * 2] = val_bytes[0];
                 bytes[i * 2 + 1] = val_bytes[1];
@@ -4965,14 +4963,14 @@ pub const Parser = struct {
             }
         } else if (std.mem.eql(u8, shape, "i32x4")) {
             for (0..4) |i| {
-                const val = try numeric_parser.parseInteger(i32, self.current_token.number);
+                const val = try std.fmt.parseInt(i32, self.current_token.number, 0);
                 const val_bytes: [4]u8 = @bitCast(val);
                 @memcpy(bytes[i * 4 .. i * 4 + 4], &val_bytes);
                 try self.advance();
             }
         } else if (std.mem.eql(u8, shape, "i64x2")) {
             for (0..2) |i| {
-                const val = try numeric_parser.parseInteger(i64, self.current_token.number);
+                const val = try std.fmt.parseInt(i64, self.current_token.number, 0);
                 const val_bytes: [8]u8 = @bitCast(val);
                 @memcpy(bytes[i * 8 .. i * 8 + 8], &val_bytes);
                 try self.advance();
@@ -5014,7 +5012,7 @@ pub const Parser = struct {
         }
 
         const F = if (T == u32) f32 else f64;
-        const val = try numeric_parser.parseFloat(F, input);
+        const val = try std.fmt.parseFloat(F, input);
         try self.advance();
         return .{ .value = @bitCast(val) };
     }
@@ -5064,13 +5062,13 @@ pub const Parser = struct {
             var bytes: [16]u8 = undefined;
             if (std.mem.eql(u8, shape, "i8x16")) {
                 for (0..16) |i| {
-                    const val = try numeric_parser.parseInteger(i8, self.current_token.number);
+                    const val = try std.fmt.parseInt(i8, self.current_token.number, 0);
                     bytes[i] = @bitCast(val);
                     try self.advance();
                 }
             } else if (std.mem.eql(u8, shape, "i16x8")) {
                 for (0..8) |i| {
-                    const val = try numeric_parser.parseInteger(i16, self.current_token.number);
+                    const val = try std.fmt.parseInt(i16, self.current_token.number, 0);
                     const val_bytes: [2]u8 = @bitCast(val);
                     bytes[i * 2] = val_bytes[0];
                     bytes[i * 2 + 1] = val_bytes[1];
@@ -5078,14 +5076,14 @@ pub const Parser = struct {
                 }
             } else if (std.mem.eql(u8, shape, "i32x4")) {
                 for (0..4) |i| {
-                    const val = try numeric_parser.parseInteger(i32, self.current_token.number);
+                    const val = try std.fmt.parseInt(i32, self.current_token.number, 0);
                     const val_bytes: [4]u8 = @bitCast(val);
                     @memcpy(bytes[i * 4 .. i * 4 + 4], &val_bytes);
                     try self.advance();
                 }
             } else if (std.mem.eql(u8, shape, "i64x2")) {
                 for (0..2) |i| {
-                    const val = try numeric_parser.parseInteger(i64, self.current_token.number);
+                    const val = try std.fmt.parseInt(i64, self.current_token.number, 0);
                     const val_bytes: [8]u8 = @bitCast(val);
                     @memcpy(bytes[i * 8 .. i * 8 + 8], &val_bytes);
                     try self.advance();
@@ -5166,7 +5164,7 @@ pub const Parser = struct {
 
                 if (std.mem.eql(u8, format_type, "binary")) {
                     // Collect binary data
-                    var binary_data = std.ArrayList(u8){};
+                    var binary_data = std.ArrayList(u8).empty;
                     defer binary_data.deinit(self.allocator);
 
                     while (self.current_token == .string) {
@@ -5191,7 +5189,7 @@ pub const Parser = struct {
 
                 if (std.mem.eql(u8, format_type, "quote")) {
                     // Collect and decode quoted strings into WAT text
-                    var text_parts = std.ArrayList(u8){};
+                    var text_parts = std.ArrayList(u8).empty;
                     defer text_parts.deinit(self.allocator);
 
                     // Wrap in (module ...) since parseModule expects it
@@ -5304,7 +5302,7 @@ pub const Parser = struct {
         const action = try self.parseAction();
 
         // Parse expected results
-        var expected: std.ArrayList(spec_types.command.Result) = .{};
+        var expected: std.ArrayList(spec_types.command.Result) = .empty;
         defer expected.deinit(self.allocator);
 
         while (self.current_token != .right_paren and self.current_token != .eof) {
@@ -5505,7 +5503,7 @@ pub const Parser = struct {
 
     /// Convert escaped string to binary data
     fn parseBinaryString(allocator: std.mem.Allocator, str: []const u8) ![]u8 {
-        var result = std.ArrayList(u8){};
+        var result = std.ArrayList(u8).empty;
         var i: usize = 0;
         while (i < str.len) {
             if (str[i] == '\\' and i + 1 < str.len) {
@@ -5577,7 +5575,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, format_type, "quote")) {
                 // module quote format: collect string literals
                 try self.advance();
-                var text_parts = std.ArrayList(u8){};
+                var text_parts = std.ArrayList(u8).empty;
                 defer text_parts.deinit(self.allocator);
 
                 while (self.current_token == .string) {
@@ -5593,7 +5591,7 @@ pub const Parser = struct {
             } else if (std.mem.eql(u8, format_type, "binary")) {
                 // module binary format: collect and convert strings
                 try self.advance();
-                var binary_data = std.ArrayList(u8){};
+                var binary_data = std.ArrayList(u8).empty;
                 defer binary_data.deinit(self.allocator);
 
                 while (self.current_token == .string) {
@@ -5685,7 +5683,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, format_type, "quote")) {
                 // module quote format: collect string literals
                 try self.advance();
-                var text_parts = std.ArrayList(u8){};
+                var text_parts = std.ArrayList(u8).empty;
                 defer text_parts.deinit(self.allocator);
 
                 while (self.current_token == .string) {
@@ -5701,7 +5699,7 @@ pub const Parser = struct {
             } else if (std.mem.eql(u8, format_type, "binary")) {
                 // module binary format: collect and convert strings
                 try self.advance();
-                var binary_data = std.ArrayList(u8){};
+                var binary_data = std.ArrayList(u8).empty;
                 defer binary_data.deinit(self.allocator);
 
                 while (self.current_token == .string) {
@@ -5843,7 +5841,7 @@ pub const Parser = struct {
         try self.advance();
 
         // Parse arguments
-        var args: std.ArrayList(spec_types.command.Value) = .{};
+        var args: std.ArrayList(spec_types.command.Value) = .empty;
         defer args.deinit(self.allocator);
 
         while (self.current_token != .right_paren and self.current_token != .eof) {
@@ -5897,7 +5895,7 @@ pub const Parser = struct {
                 std.debug.print("Error: parseValue: Unexpected token at line {d}: col {d}: {s}\n", .{ self.lexer.line, self.lexer.getColumn(), self.lexer.getCurrentLine() });
                 return TextDecodeError.UnexpectedToken;
             }
-            const value = try numeric_parser.parseInteger(i32, self.current_token.number);
+            const value = try std.fmt.parseInt(i32, self.current_token.number, 0);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Value{ .i32 = value };
@@ -5906,7 +5904,7 @@ pub const Parser = struct {
                 std.debug.print("Error: parseValue: Unexpected token at line {d}: col {d}: {s}\n", .{ self.lexer.line, self.lexer.getColumn(), self.lexer.getCurrentLine() });
                 return TextDecodeError.UnexpectedToken;
             }
-            const value = try numeric_parser.parseInteger(i64, self.current_token.number);
+            const value = try std.fmt.parseInt(i64, self.current_token.number, 0);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Value{ .i64 = value };
@@ -5920,7 +5918,7 @@ pub const Parser = struct {
                 return TextDecodeError.UnexpectedToken;
             };
 
-            const value = try numeric_parser.parseFloat(f32, input);
+            const value = try std.fmt.parseFloat(f32, input);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Value{ .f32 = @bitCast(value) };
@@ -5933,7 +5931,7 @@ pub const Parser = struct {
                 std.debug.print("Error: parseValue: Unexpected token at line {d}: col {d}: {s}\n", .{ self.lexer.line, self.lexer.getColumn(), self.lexer.getCurrentLine() });
                 return TextDecodeError.UnexpectedToken;
             };
-            const value = try numeric_parser.parseFloat(f64, input);
+            const value = try std.fmt.parseFloat(f64, input);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Value{ .f64 = @bitCast(value) };
@@ -6009,7 +6007,7 @@ pub const Parser = struct {
                 std.debug.print("Error: parseResult: Unexpected token at line {d}: col {d}: {s}\n", .{ self.lexer.line, self.lexer.getColumn(), self.lexer.getCurrentLine() });
                 return TextDecodeError.UnexpectedToken;
             }
-            const value = try numeric_parser.parseInteger(i32, self.current_token.number);
+            const value = try std.fmt.parseInt(i32, self.current_token.number, 0);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Result{ .i32 = value };
@@ -6018,7 +6016,7 @@ pub const Parser = struct {
                 std.debug.print("Error: parseResult: Unexpected token at line {d}: col {d}: {s}\n", .{ self.lexer.line, self.lexer.getColumn(), self.lexer.getCurrentLine() });
                 return TextDecodeError.UnexpectedToken;
             }
-            const value = try numeric_parser.parseInteger(i64, self.current_token.number);
+            const value = try std.fmt.parseInt(i64, self.current_token.number, 0);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Result{ .i64 = value };
@@ -6042,7 +6040,7 @@ pub const Parser = struct {
                 return spec_types.command.Result{ .f32 = .nan_arithmetic };
             }
 
-            const value = try numeric_parser.parseFloat(f32, input);
+            const value = try std.fmt.parseFloat(f32, input);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Result{ .f32 = .{ .value = @bitCast(value) } };
@@ -6066,7 +6064,7 @@ pub const Parser = struct {
                 return spec_types.command.Result{ .f64 = .nan_arithmetic };
             }
 
-            const value = try numeric_parser.parseFloat(f64, input);
+            const value = try std.fmt.parseFloat(f64, input);
             try self.advance();
             try self.expectToken(.right_paren);
             return spec_types.command.Result{ .f64 = .{ .value = @bitCast(value) } };
@@ -6076,7 +6074,7 @@ pub const Parser = struct {
             return result;
         } else if (std.mem.eql(u8, type_name, "either")) {
             // Parse (either (result1) (result2) ...)
-            var alternatives: std.ArrayList(spec_types.command.Result) = .{};
+            var alternatives: std.ArrayList(spec_types.command.Result) = .empty;
             defer alternatives.deinit(self.allocator);
             while (self.current_token != .right_paren and self.current_token != .eof) {
                 const alt = try self.parseResult();
@@ -6153,7 +6151,7 @@ pub fn parseWastModule(allocator: std.mem.Allocator, input: []const u8) !wasm_co
 
 /// Parse a complete .wast script file
 pub fn parseWastScript(allocator: std.mem.Allocator, input: []const u8) ![]spec_types.command.Command {
-    var commands: std.ArrayList(spec_types.command.Command) = .{};
+    var commands: std.ArrayList(spec_types.command.Command) = .empty;
     errdefer {
         for (commands.items) |*cmd| {
             freeCommand(allocator, cmd);

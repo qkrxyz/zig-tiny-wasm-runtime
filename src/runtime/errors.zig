@@ -21,4 +21,5 @@ pub const Error = error{
     StackUnderflow,
     TypeMismatch,
     UncaughtException,
+    OutOfMemory,
 };

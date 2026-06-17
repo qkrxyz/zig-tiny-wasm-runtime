@@ -11,6 +11,10 @@ const ModuleInst = runtime_types.ModuleInst;
 const Value = runtime_types.Value;
 const ExternalValue = runtime_types.ExternalValue;
 const FuncAddr = runtime_types.FuncAddr;
+const FuncInst = runtime_types.FuncInst;
+const HostFunction = runtime_types.HostFunction;
+const HostFunctionError = runtime_types.HostFunctionError;
+const ExportInst = runtime_types.ExportInst;
 const Module = core.types.Module;
 
 /// A type of WebAssembly runtime engine, which wraps `Instance`.
@@ -18,13 +22,15 @@ pub const Engine = struct {
     const Self = @This();
     pub const ModuleInstMap = std.StringHashMap(*ModuleInst);
 
+    io: std.Io,
     allocator: std.mem.Allocator,
     instance: Instance,
     mod_insts: ModuleInstMap,
 
-    pub fn new(allocator: std.mem.Allocator, verbose: bool) Self {
+    pub fn new(allocator: std.mem.Allocator, io: std.Io, verbose: bool) Self {
         return .{
             .allocator = allocator,
+            .io = io,
             .instance = Instance.new(allocator, verbose),
             .mod_insts = ModuleInstMap.init(allocator),
         };
@@ -56,10 +62,9 @@ pub const Engine = struct {
         const decode = @import("wasm-decode");
         var loader = decode.Loader.new(self.allocator);
 
-        const file = try std.fs.cwd().openFile(file_name, .{ .mode = .read_only });
-        defer file.close();
-        const data = try file.readToEndAlloc(self.allocator, 10_000_000);
+        const data = try std.Io.Dir.cwd().readFileAlloc(self.io, file_name, self.allocator, .limited(10_000_000));
         defer self.allocator.free(data);
+
         const module = try loader.parseAll(data);
         defer module.deinit();
 
@@ -68,7 +73,7 @@ pub const Engine = struct {
         return try self.loadModule(module, if (module_name) |n| n else getFilename(file_name));
     }
 
-    pub fn loadModule(self: *Self, module: Module, module_name: []const u8) (Error || validate.Error || error{OutOfMemory})!*ModuleInst {
+    pub fn loadModule(self: *Self, module: Module, module_name: []const u8) (Error || validate.Error || HostFunctionError || error{OutOfMemory})!*ModuleInst {
         try validate.validateModule(module, self.allocator);
         const extern_vals = try resolver.resolveImports(self.instance.store, self.mod_insts, module, self.allocator);
         defer self.allocator.free(extern_vals);
@@ -81,12 +86,41 @@ pub const Engine = struct {
         try self.mod_insts.put(module_name, mod_inst);
     }
 
-    pub fn invokeFunctionByAddr(self: *Self, func_addr: FuncAddr, args: []const Value) (Error || error{OutOfMemory})![]const Value {
+    pub fn registerHostFunction(
+        self: *Self,
+        module_name: []const u8,
+        function_name: []const u8,
+        function_type: core.types.FuncType,
+        host: HostFunction,
+    ) error{ OutOfMemory, DuplicateHostModule }!void {
+        if (self.mod_insts.contains(module_name))
+            return error.DuplicateHostModule;
+
+        const func_addr: FuncAddr = @intCast(self.instance.store.funcs.items.len);
+        try self.instance.store.funcs.append(self.allocator, FuncInst{
+            .type = function_type,
+            .host = host,
+        });
+
+        const mod_inst = try self.allocator.create(ModuleInst);
+        mod_inst.* = .{
+            .func_addrs = try self.allocator.dupe(FuncAddr, &.{func_addr}),
+            .exports = try self.allocator.dupe(ExportInst, &.{
+                .{
+                    .name = function_name,
+                    .value = .{ .function = func_addr },
+                },
+            }),
+        };
+        try self.registerModule(mod_inst, module_name);
+    }
+
+    pub fn invokeFunctionByAddr(self: *Self, func_addr: FuncAddr, args: []const Value) (Error || HostFunctionError || error{OutOfMemory})![]const Value {
         std.debug.assert(self.instance.stack.array.items.len == 0);
         return try self.instance.invokeFunctionByAddr(func_addr, args);
     }
 
-    pub fn invokeFunctionByName(self: *Self, func_name: []const u8, args: []const Value) (Error || error{OutOfMemory})![]const Value {
+    pub fn invokeFunctionByName(self: *Self, func_name: []const u8, args: []const Value) (Error || HostFunctionError || error{OutOfMemory})![]const Value {
         var it = self.mod_insts.valueIterator();
         while (it.next()) |mod_inst| {
             const exp = try resolver.findExport(mod_inst.*.*, func_name);

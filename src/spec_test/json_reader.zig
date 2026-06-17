@@ -11,11 +11,16 @@ const ExternAddr = spec_types.command.ExternAddr;
 const FuncAddr = spec_types.command.FuncAddr;
 const FloatType = spec_types.command.FloatType;
 
-pub fn readJsonFromFile(file: std.fs.File, allocator: std.mem.Allocator) ![]const Command {
-    const buffer = try file.readToEndAlloc(allocator, 10_000_000);
-    defer allocator.free(buffer);
+pub fn readJsonFromFile(io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) ![]const Command {
+    const file_content = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        file_path,
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(file_content);
 
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, buffer, .{});
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, file_content, .{});
     defer parsed.deinit();
 
     return try commandArrayFromJson(parsed.value, allocator);

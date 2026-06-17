@@ -13,12 +13,18 @@ pub const SpecTestRunner = struct {
     const Self = @This();
 
     engine: runtime.Engine,
+    io: std.Io,
     allocator: std.mem.Allocator,
     verbose_level: u32,
 
-    pub fn new(allocator: std.mem.Allocator, verbose_level: u8) !Self {
-        const engine = runtime.Engine.new(allocator, verbose_level >= 2);
-        return .{ .engine = engine, .allocator = allocator, .verbose_level = verbose_level };
+    pub fn new(io: std.Io, allocator: std.mem.Allocator, verbose_level: u8) !Self {
+        const engine = runtime.Engine.new(allocator, io, verbose_level >= 2);
+        return .{
+            .engine = engine,
+            .io = io,
+            .allocator = allocator,
+            .verbose_level = verbose_level,
+        };
     }
 
     fn loadSpectestHostModule(self: *Self) !*runtime.types.ModuleInst {
@@ -54,13 +60,11 @@ pub const SpecTestRunner = struct {
 
     pub fn execFromFile(self: *Self, file_name: []const u8) !void {
         if (std.mem.endsWith(u8, file_name, ".wast") or std.mem.endsWith(u8, file_name, ".wat")) {
-            const commands = try wast_reader.readWastFromFile(file_name, self.allocator);
+            const commands = try wast_reader.readWastFromFile(self.io, self.allocator, file_name);
             defer wast_reader.freeCommands(commands, self.allocator);
             try self.execCommands(commands);
         } else {
-            const file = try std.fs.cwd().openFile(file_name, .{ .mode = .read_only });
-            defer file.close();
-            const commands = try json_reader.readJsonFromFile(file, self.allocator);
+            const commands = try json_reader.readJsonFromFile(self.io, file_name, self.allocator);
             defer self.freeCommands(commands);
             try self.execCommands(commands);
         }
@@ -87,7 +91,7 @@ pub const SpecTestRunner = struct {
 
         for (commands) |cmd| {
             if (self.verbose_level >= 2) {
-                self.debugPrint("-" ** 75 ++ "\n", .{});
+                self.debugPrint("---------------------------------------------------------------------------\n", .{});
                 self.debugPrint("{f}\n", .{cmd});
             }
 
@@ -317,7 +321,7 @@ pub const SpecTestRunner = struct {
                             continue;
                         };
                         defer module.deinit();
-                        
+
                         if (self.engine.loadModule(module, "")) |_| {
                             failed += 1;
                             if (self.verbose_level >= 1) {
@@ -341,7 +345,7 @@ pub const SpecTestRunner = struct {
                             continue;
                         };
                         defer module.deinit();
-                        
+
                         if (self.engine.loadModule(module, "")) |_| {
                             failed += 1;
                             if (self.verbose_level >= 1) {

@@ -29,7 +29,7 @@ pub const ValueType = enum(u8) {
     func_ref = @intFromEnum(wasm.RefType.funcref),
     extern_ref = @intFromEnum(wasm.RefType.externref),
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s}", .{@tagName(self)});
     }
 };
@@ -67,7 +67,7 @@ pub const FuncType = struct {
     parameter_types: []const ValueType,
     result_types: []const ValueType,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.writeAll("(");
         for (self.parameter_types, 0..) |ty, i| {
             _ = try writer.print("{f}{s}", .{ ty, if (i + 1 < self.parameter_types.len) ", " else "" });
@@ -97,7 +97,7 @@ pub const InitExpression = union(enum) {
     // multiple instructions (for extended constant expressions)
     instructions: []const Instruction,
 
-    // pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    // pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
     //     switch (self) {
     //         inline else => |val| try writer.print("{}", .{val}),
     //     }
@@ -108,7 +108,7 @@ pub const Limits = struct {
     min: u32,
     max: ?u32,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("[{d},{d?}]", .{ self.min, self.max });
     }
 };
@@ -118,7 +118,7 @@ pub const Import = struct {
     name: []const u8,
     desc: ImportDesc,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s}.{s} {f}", .{ self.module_name, self.name, self.desc });
     }
 };
@@ -127,7 +127,7 @@ pub const Export = struct {
     name: []const u8,
     desc: ExportDesc,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s} ({f})", .{ self.name, self.desc });
     }
 };
@@ -154,7 +154,7 @@ pub const TableType = struct {
     is_64: bool = false,
     ref_type_ext: ?RefTypeExt = null,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f}:{f}", .{ self.limits, self.ref_type });
     }
 };
@@ -164,7 +164,7 @@ pub const GlobalType = struct {
     mutability: Mutability,
     ref_type_ext: ?RefTypeExt = null,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f}:{f}", .{ self.mutability, self.value_type });
     }
 };
@@ -173,7 +173,7 @@ pub const MemoryType = struct {
     limits: Limits,
     is_64: bool = false,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f}", .{self.limits});
     }
 };

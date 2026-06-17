@@ -45,7 +45,7 @@ pub const ModuleLoader = struct {
 
         var tags: []const types.Tag = &.{};
 
-        var sections: [14]bool = .{false} ** 14;
+        var sections: [14]bool = @splat(false);
         var last_section_id: u8 = 0;
         while (!self.reader.eof()) {
             const maybe_sec = try self.section(&tags);
@@ -427,7 +427,7 @@ pub const ModuleLoader = struct {
     fn initExpr(self: *Self) (Error || error{OutOfMemory})!types.InitExpression {
         const start_pos = self.reader.position;
         const op = try self.reader.readU8();
-        
+
         // Check if this is a simple single-instruction constant expression
         const is_simple = switch (op) {
             opcode2int(.i32_const),
@@ -441,7 +441,7 @@ pub const ModuleLoader = struct {
             => true,
             else => false,
         };
-        
+
         if (is_simple) {
             const value = try self.initExprValue(op);
             const end = try self.reader.readU8();
@@ -449,11 +449,11 @@ pub const ModuleLoader = struct {
                 return Error.EndOpcodeExpected;
             return value;
         }
-        
+
         // Complex expression with multiple instructions
         self.reader.position = start_pos;
         const code_start = self.reader.position;
-        
+
         // Find the end opcode
         var depth: u32 = 0;
         while (true) {
@@ -465,17 +465,17 @@ pub const ModuleLoader = struct {
                 depth += 1;
             }
         }
-        
+
         const code_end = self.reader.position - 1; // exclude end opcode
         const code_len = code_end - code_start;
-        
+
         self.reader.position = code_start;
         const code_buf = try self.reader.readBytes(code_len);
         _ = try self.reader.readU8(); // consume end opcode
-        
+
         var decoder = Decoder.new();
         const instrs = try decoder.parseAll(code_buf, self.allocator);
-        
+
         return .{ .instructions = instrs };
     }
 
@@ -577,7 +577,7 @@ pub const ModuleLoader = struct {
     fn valueType(self: *Self) Error!types.ValueType {
         const byte = try self.reader.readU8();
         return utils.valueTypeFromNum(byte) orelse {
-            std.debug.dumpCurrentStackTrace(null);
+            std.debug.dumpCurrentStackTrace(.{});
             std.debug.print("MalformedValueType=[{}]\n", .{byte});
             return Error.MalformedValueType;
         };

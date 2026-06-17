@@ -66,7 +66,6 @@ pub const ModuleValidator = struct {
 
             for (module.exports) |exp|
                 try validateExport(c, exp);
-
         }
 
         { // under the context c'
@@ -934,14 +933,20 @@ pub const ModuleValidator = struct {
     }
 };
 
-inline fn exp2(n: u32) error{NegativeNumberAlignment}!u32 {
+inline fn exp2(n: u32) !u32 {
     return if (n < 32)
         @as(u32, 1) << @intCast(n)
     else
-        Error.NegativeNumberAlignment;
+        error.NegativeNumberAlignment;
 }
 
-inline fn opLoad(comptime T: type, comptime N: type, mem_arg: Instruction.MemArg, type_stack: *TypeStack, c: Context) Error!void {
+inline fn opLoad(
+    comptime T: type,
+    comptime N: type,
+    mem_arg: Instruction.MemArg,
+    type_stack: *TypeStack,
+    c: Context,
+) !void {
     if (try exp2(mem_arg.@"align") > @bitSizeOf(N) / 8)
         return Error.NegativeNumberAlignment;
     try c.checkMem(mem_arg.mem_idx);

@@ -62,9 +62,15 @@ pub const Instance = struct {
         };
     }
 
+    pub fn deinit(self: *Self) void {
+        self.stack.deinit();
+        self.store.deinit(self.allocator);
+        self.caught_exceptions.deinit(self.allocator);
+    }
+
     /// `Invocation of function address` and `Returning from a function`
     /// https://webassembly.github.io/spec/core/exec/instructions.html#function-calls
-    fn invokeFunction(self: *Self, func_addr: FuncAddr) (Error || error{OutOfMemory})!void {
+    fn invokeFunction(self: *Self, func_addr: FuncAddr) !void {
         // 1:
         assert(func_addr < self.store.funcs.items.len);
 
@@ -72,11 +78,41 @@ pub const Instance = struct {
         const func_inst = self.store.funcs.items[func_addr];
         const func_type = func_inst.type;
 
+        if (func_inst.host) |host| {
+            const args = try self.allocator.alloc(Value, func_type.parameter_types.len);
+            defer self.allocator.free(args);
+
+            var i = args.len;
+            while (i > 0) : (i -= 1) {
+                const item = self.stack.pop();
+                assert(item == .value);
+                args[i - 1] = item.value;
+            }
+
+            const results = try host.callback(host.context, &self.store, args, self.allocator);
+            defer self.allocator.free(results);
+
+            if (results.len != func_type.result_types.len)
+                return Error.InvocationParameterMismatch;
+
+            for (func_type.result_types, results) |expected, actual| {
+                if (expected != actual)
+                    return Error.InvocationParameterMismatch;
+            }
+
+            for (results) |result|
+                try self.stack.push(.{ .value = result });
+
+            return;
+        }
+
         // 4, 8:
         const p_len = func_type.parameter_types.len;
-        const num_locals = p_len + func_inst.code.locals.len;
+        const code = func_inst.code.?;
+        const module = func_inst.module.?;
+        const num_locals = p_len + code.locals.len;
         const locals = try self.allocator.alloc(Value, num_locals); // freed in returnFunction
-        for (func_inst.code.locals, p_len..) |l, i| {
+        for (code.locals, p_len..) |l, i| {
             locals[i] = Value.defaultValueFrom(l);
         }
 
@@ -93,20 +129,20 @@ pub const Instance = struct {
         const frame = ActivationFrame{
             .locals = locals,
             .arity = @intCast(num_returns),
-            .module = func_inst.module,
-            .instructions = func_inst.code.body,
+            .module = module,
+            .instructions = code.body,
         };
         try self.stack.push(.{ .frame = frame });
         try self.stack.push(.{ .label = .{ .arity = @intCast(num_returns), .type = .root } });
 
         self.debugPrint("---------------\n", .{});
-        for (func_inst.code.body, 0..) |op, idx|
+        for (code.body, 0..) |op, idx|
             self.debugPrint("[{d}] {any}\n", .{ idx, op });
         self.debugPrint("---------------\n", .{});
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#returning-from-a-function
-    fn returnFunction(self: *Self) (Error || error{OutOfMemory})!void {
+    fn returnFunction(self: *Self) !void {
         // 1, 2, 3
         const top_frame = self.stack.topFrame();
         const num_returns = top_frame.arity;
@@ -126,7 +162,7 @@ pub const Instance = struct {
 
     /// https://webassembly.github.io/spec/core/exec/modules.html#invocation
     /// The coller should free the returned slice
-    pub fn invokeFunctionByAddr(self: *Self, func_addr: FuncAddr, args: []const Value) (Error || error{OutOfMemory})![]const Value {
+    pub fn invokeFunctionByAddr(self: *Self, func_addr: FuncAddr, args: []const Value) ![]const Value {
         // 1:
         assert(func_addr < self.store.funcs.items.len);
 
@@ -136,12 +172,12 @@ pub const Instance = struct {
 
         // 4:
         if (func_type.parameter_types.len != args.len)
-            return Error.InvocationParameterMismatch;
+            return error.InvocationParameterMismatch;
 
         // 5:
         for (func_type.parameter_types, args) |p, a| {
             if (p != a) {
-                return Error.InvocationParameterMismatch;
+                return error.InvocationParameterMismatch;
             }
         }
 
@@ -177,7 +213,7 @@ pub const Instance = struct {
         return return_values;
     }
 
-    fn execLoop(self: *Self) (Error || error{OutOfMemory})!void {
+    fn execLoop(self: *Self) !void {
         while (true) {
             const instrs = self.stack.topFrame().instructions;
             const ip = self.stack.topFrame().ip;
@@ -187,7 +223,7 @@ pub const Instance = struct {
             self.debugPrint("= [{d}]: {any}\n", .{ ip, instr });
 
             const flow_ctrl = self.execInstruction(instr) catch |err| {
-                if (err == Error.UncaughtException) {
+                if (err == error.UncaughtException) {
                     // Search for a matching catch handler, propagating through frames
                     while (true) {
                         switch (try self.handleException()) {
@@ -207,9 +243,9 @@ pub const Instance = struct {
                                 // No handler in current frame, unwind and try caller
                                 self.unwindFrame();
                                 if (!self.stack.hasFrame())
-                                    return Error.UncaughtException;
+                                    return error.UncaughtException;
                                 if (self.stack.topFrame().instructions.len == 0)
-                                    return Error.UncaughtException;
+                                    return error.UncaughtException;
                             },
                         }
                     }
@@ -245,7 +281,7 @@ pub const Instance = struct {
         unreachable;
     }
 
-    pub fn instantiate(self: *Self, module: Module, extern_vals: []const ExternalValue) (Error || error{OutOfMemory})!*ModuleInst {
+    pub fn instantiate(self: *Self, module: Module, extern_vals: []const ExternalValue) !*ModuleInst {
         return self.instantiateInner(module, extern_vals) catch |err| {
             self.clearStack();
             return err;
@@ -254,12 +290,12 @@ pub const Instance = struct {
 
     /// `instantiate` in wasm spec
     /// https://webassembly.github.io/spec/core/exec/modules.html#instantiation
-    inline fn instantiateInner(self: *Self, module: Module, extern_vals: []const ExternalValue) (Error || error{OutOfMemory})!*ModuleInst {
+    inline fn instantiateInner(self: *Self, module: Module, extern_vals: []const ExternalValue) !*ModuleInst {
         // 1, 2: validate
 
         // 3: check length
         if (module.imports.len != extern_vals.len)
-            return Error.InstantiationFailed;
+            return error.InstantiationFailed;
 
         // 4: verifying external value is done in resolver
 
@@ -465,20 +501,20 @@ pub const Instance = struct {
     }
 
     /// executes an instruction without control flow
-    fn execOneInstruction(self: *Self, instr: Instruction) (Error || error{OutOfMemory})!void {
+    fn execOneInstruction(self: *Self, instr: Instruction) Error!void {
         self.debugPrint("= {any}\n", .{instr});
         _ = try self.execInstruction(instr);
     }
 
     /// executes an instruction and returns control flow
-    fn execInstruction(self: *Self, instr: Instruction) (Error || error{OutOfMemory})!FlowControl {
+    fn execInstruction(self: *Self, instr: Instruction) Error!FlowControl {
         switch (instr) {
             .end => return self.opEnd(),
             .@"else" => return self.opElse(),
 
             // contronl instructions
             .nop => {},
-            .@"unreachable" => return Error.Unreachable,
+            .@"unreachable" => return error.Unreachable,
             .block => |block_info| try self.opBlock(block_info),
             .loop => |block_info| try self.opLoop(block_info),
             .@"if" => |block_info| return self.opIf(block_info),
@@ -1001,24 +1037,31 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-block-xref-syntax-instructions-syntax-blocktype-mathit-blocktype-xref-syntax-instructions-syntax-instr-mathit-instr-ast-xref-syntax-instructions-syntax-instr-control-mathsf-end
-    inline fn opBlock(self: *Self, block_info: Instruction.BlockInfo) error{CallStackExhausted}!void {
+    inline fn opBlock(
+        self: *Self,
+        block_info: Instruction.BlockInfo,
+    ) !void {
         try self.insertLabel(block_info.type, .{ .block = block_info.end });
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-loop-xref-syntax-instructions-syntax-blocktype-mathit-blocktype-xref-syntax-instructions-syntax-instr-mathit-instr-ast-xref-syntax-instructions-syntax-instr-control-mathsf-end
-    inline fn opLoop(self: *Self, block_info: Instruction.BlockInfo) error{CallStackExhausted}!void {
+    inline fn opLoop(self: *Self, block_info: Instruction.BlockInfo) !void {
         const ip = self.stack.topFrame().ip;
         try self.insertLabel(block_info.type, .{ .loop = ip });
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-if-xref-syntax-instructions-syntax-blocktype-mathit-blocktype-xref-syntax-instructions-syntax-instr-mathit-instr-1-ast-xref-syntax-instructions-syntax-instr-control-mathsf-else-xref-syntax-instructions-syntax-instr-mathit-instr-2-ast-xref-syntax-instructions-syntax-instr-control-mathsf-end
-    inline fn opIf(self: *Self, block_info: Instruction.IfBlockInfo) error{CallStackExhausted}!FlowControl {
+    inline fn opIf(self: *Self, block_info: Instruction.IfBlockInfo) !FlowControl {
         const cond = self.stack.pop().value.i32;
         try self.insertLabel(block_info.type, .{ .@"if" = block_info.end });
         return FlowControl.newAtOpIf(block_info, cond);
     }
 
-    inline fn insertLabel(self: *Self, block_type: Instruction.BlockType, label_type: LabelType) error{CallStackExhausted}!void {
+    inline fn insertLabel(
+        self: *Self,
+        block_type: Instruction.BlockType,
+        label_type: LabelType,
+    ) !void {
         const module = self.stack.topFrame().module;
         const func_type = expandToFuncType(module, block_type);
         const arity = if (label_type == .loop) func_type.parameter_types.len else func_type.result_types.len;
@@ -1030,7 +1073,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-br-l
-    inline fn opBr(self: *Self, label_idx: LabelIdx) (error{CallStackExhausted} || error{OutOfMemory})!FlowControl {
+    inline fn opBr(self: *Self, label_idx: LabelIdx) !FlowControl {
         const label = self.stack.getNthLabelFromTop(label_idx);
 
         var array = try self.allocator.alloc(StackItem, label.arity);
@@ -1057,26 +1100,26 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-br-if-l
-    inline fn opBrIf(self: *Self, label_idx: LabelIdx) (error{CallStackExhausted} || error{OutOfMemory})!FlowControl {
+    inline fn opBrIf(self: *Self, label_idx: LabelIdx) !FlowControl {
         const value = self.stack.pop().value;
         return if (value.i32 == 0) FlowControl.none else self.opBr(label_idx);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-br-table-l-ast-l-n
-    inline fn opBrTable(self: *Self, table_info: Instruction.BrTableType) (error{CallStackExhausted} || error{OutOfMemory})!FlowControl {
+    inline fn opBrTable(self: *Self, table_info: Instruction.BrTableType) !FlowControl {
         const value = self.stack.pop().value.asU32();
         const label_idx = if (value < table_info.label_idxs.len) table_info.label_idxs[value] else table_info.default_label_idx;
         return self.opBr(label_idx);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-call-x
-    inline fn opCall(self: *Self, func_idx: FuncIdx) Error!FlowControl {
+    inline fn opCall(self: *Self, func_idx: FuncIdx) !FlowControl {
         const module = self.stack.topFrame().module;
         return .{ .call = module.func_addrs[func_idx] };
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-call-indirect-x-y
-    inline fn opCallIndirect(self: *Self, arg: Instruction.CallIndirectArg) Error!FlowControl {
+    inline fn opCallIndirect(self: *Self, arg: Instruction.CallIndirectArg) !FlowControl {
         const module = self.stack.topFrame().module;
         const ta = module.table_addrs[arg.table_idx];
         const tab = self.store.tables.items[ta];
@@ -1089,35 +1132,35 @@ pub const Instance = struct {
         else
             @intCast(self.stack.pop().value.asU32());
         if (i >= tab.elem.len)
-            return Error.UndefinedElement;
+            return error.UndefinedElement;
 
         const r = tab.elem[i];
         if (r.isNull())
-            return Error.UninitializedElement;
+            return error.UninitializedElement;
         const a = r.func_ref.?;
 
         const f = self.store.funcs.items[a];
         const ft_actual = f.type;
         if (ft_expect.parameter_types.len != ft_actual.parameter_types.len or ft_expect.result_types.len != ft_actual.result_types.len)
-            return Error.IndirectCallTypeMismatch;
+            return error.IndirectCallTypeMismatch;
 
         for (ft_expect.parameter_types, ft_actual.parameter_types) |ex, ac|
-            if (ex != ac) return Error.IndirectCallTypeMismatch;
+            if (ex != ac) return error.IndirectCallTypeMismatch;
 
         for (ft_expect.result_types, ft_actual.result_types) |ex, ac|
-            if (ex != ac) return Error.IndirectCallTypeMismatch;
+            if (ex != ac) return error.IndirectCallTypeMismatch;
 
         return .{ .call = a };
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-return-call-x
-    inline fn opReturnCall(self: *Self, func_idx: FuncIdx) Error!FlowControl {
+    inline fn opReturnCall(self: *Self, func_idx: FuncIdx) !FlowControl {
         const module = self.stack.topFrame().module;
         return .{ .tail_call = module.func_addrs[func_idx] };
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-control-mathsf-return-call-indirect-x-y
-    inline fn opReturnCallIndirect(self: *Self, arg: Instruction.CallIndirectArg) Error!FlowControl {
+    inline fn opReturnCallIndirect(self: *Self, arg: Instruction.CallIndirectArg) !FlowControl {
         const module = self.stack.topFrame().module;
         const ta = module.table_addrs[arg.table_idx];
         const tab = self.store.tables.items[ta];
@@ -1130,29 +1173,29 @@ pub const Instance = struct {
         else
             @intCast(self.stack.pop().value.asU32());
         if (i >= tab.elem.len)
-            return Error.UndefinedElement;
+            return error.UndefinedElement;
 
         const r = tab.elem[i];
         if (r.isNull())
-            return Error.UninitializedElement;
+            return error.UninitializedElement;
         const a = r.func_ref.?;
 
         const f = self.store.funcs.items[a];
         const ft_actual = f.type;
         if (ft_expect.parameter_types.len != ft_actual.parameter_types.len or ft_expect.result_types.len != ft_actual.result_types.len)
-            return Error.IndirectCallTypeMismatch;
+            return error.IndirectCallTypeMismatch;
 
         for (ft_expect.parameter_types, ft_actual.parameter_types) |ex, ac|
-            if (ex != ac) return Error.IndirectCallTypeMismatch;
+            if (ex != ac) return error.IndirectCallTypeMismatch;
 
         for (ft_expect.result_types, ft_actual.result_types) |ex, ac|
-            if (ex != ac) return Error.IndirectCallTypeMismatch;
+            if (ex != ac) return error.IndirectCallTypeMismatch;
 
         return .{ .tail_call = a };
     }
 
     /// Tail call: discard current frame and invoke a new function
-    fn tailCallFunction(self: *Self, func_addr: FuncAddr) (Error || error{OutOfMemory})!void {
+    fn tailCallFunction(self: *Self, func_addr: FuncAddr) !void {
         assert(func_addr < self.store.funcs.items.len);
         const func_inst = self.store.funcs.items[func_addr];
         const num_args = func_inst.type.parameter_types.len;
@@ -1177,7 +1220,7 @@ pub const Instance = struct {
     // reference instructions
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-ref-mathsf-ref-null-t
-    inline fn opRefNull(self: *Self, ref_type: RefType) error{CallStackExhausted}!void {
+    inline fn opRefNull(self: *Self, ref_type: RefType) !void {
         const val: Value = switch (ref_type) {
             .funcref => .{ .func_ref = null },
             .externref => .{ .extern_ref = null },
@@ -1186,14 +1229,14 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-ref-mathsf-ref-is-null
-    inline fn opIsNull(self: *Self) error{CallStackExhausted}!void {
+    inline fn opIsNull(self: *Self) !void {
         const val = self.stack.pop().value;
         const v: i32 = if (val.isNull()) 1 else 0;
         try self.stack.pushValueAs(i32, v);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-ref-mathsf-ref-func-x
-    inline fn opRefFunc(self: *Self, func_idx: FuncIdx) error{CallStackExhausted}!void {
+    inline fn opRefFunc(self: *Self, func_idx: FuncIdx) !void {
         const module = self.stack.topFrame().module;
         const a = module.func_addrs[func_idx];
         try self.stack.push(.{ .value = .{ .func_ref = a } });
@@ -1202,27 +1245,27 @@ pub const Instance = struct {
     // typed reference instructions
 
     /// call_ref: pop funcref, if null trap, otherwise call
-    inline fn opCallRef(self: *Self) Error!FlowControl {
+    inline fn opCallRef(self: *Self) !FlowControl {
         const val = self.stack.pop().value;
         if (val.func_ref) |func_addr| {
             return .{ .call = func_addr };
         }
-        return Error.NullFunctionReference;
+        return error.NullFunctionReference;
     }
 
     /// return_call_ref: pop funcref, if null trap, otherwise tail call
-    inline fn opReturnCallRef(self: *Self) Error!FlowControl {
+    inline fn opReturnCallRef(self: *Self) !FlowControl {
         const val = self.stack.pop().value;
         if (val.func_ref) |func_addr| {
             return .{ .tail_call = func_addr };
         }
-        return Error.NullFunctionReference;
+        return error.NullFunctionReference;
     }
 
     /// ref.as_non_null: pop ref, trap if null, push back
-    inline fn opRefAsNonNull(self: *Self) (Error || error{OutOfMemory})!void {
+    inline fn opRefAsNonNull(self: *Self) !void {
         const val = self.stack.pop().value;
-        if (val.isNull()) return Error.NullReference;
+        if (val.isNull()) return error.NullReference;
         try self.stack.push(.{ .value = val });
     }
 
@@ -1248,10 +1291,10 @@ pub const Instance = struct {
 
     // exception handling instructions
 
-    fn opThrow(self: *Self, tag_idx: u32) (Error || error{OutOfMemory})!FlowControl {
+    fn opThrow(self: *Self, tag_idx: u32) !FlowControl {
         const frame = self.stack.topFrame();
         const mod = frame.module;
-        if (tag_idx >= mod.tag_addrs.len) return Error.OtherError;
+        if (tag_idx >= mod.tag_addrs.len) return error.OtherError;
         const tag_addr = mod.tag_addrs[tag_idx];
         const tag_inst = self.store.tags.items[tag_addr];
         const param_count = tag_inst.type.parameter_types.len;
@@ -1267,13 +1310,13 @@ pub const Instance = struct {
             .tag_addr = tag_addr,
             .values = exception_values,
         };
-        return Error.UncaughtException;
+        return error.UncaughtException;
     }
 
-    fn opThrowRef(self: *Self) (Error || error{OutOfMemory})!FlowControl {
+    fn opThrowRef(self: *Self) !FlowControl {
         const val = self.stack.pop().value;
-        const exn_idx = val.extern_ref orelse return Error.NullReference;
-        if (exn_idx >= self.caught_exceptions.items.len) return Error.OtherError;
+        const exn_idx = val.extern_ref orelse return error.NullReference;
+        if (exn_idx >= self.caught_exceptions.items.len) return error.OtherError;
         const caught = self.caught_exceptions.items[exn_idx];
 
         // Duplicate values so the caught_exceptions entry remains valid for reuse
@@ -1284,10 +1327,10 @@ pub const Instance = struct {
             .tag_addr = caught.tag_addr,
             .values = dup_values,
         };
-        return Error.UncaughtException;
+        return error.UncaughtException;
     }
 
-    fn opTryTable(self: *Self, info: Instruction.TryTableInfo) (Error || error{OutOfMemory})!void {
+    fn opTryTable(self: *Self, info: Instruction.TryTableInfo) !void {
         const frame = self.stack.topFrame();
         const mod = frame.module;
 
@@ -1296,7 +1339,7 @@ pub const Instance = struct {
         for (info.catches, 0..) |clause, ci| {
             const tag_addr: local_types.TagAddr = switch (clause.kind) {
                 .@"catch", .catch_ref => blk: {
-                    if (clause.tag_idx >= mod.tag_addrs.len) return Error.OtherError;
+                    if (clause.tag_idx >= mod.tag_addrs.len) return error.OtherError;
                     break :blk mod.tag_addrs[clause.tag_idx];
                 },
                 .catch_all, .catch_all_ref => 0,
@@ -1331,7 +1374,7 @@ pub const Instance = struct {
         not_found,
     };
 
-    fn handleException(self: *Self) (Error || error{OutOfMemory})!ExcHandleResult {
+    fn handleException(self: *Self) !ExcHandleResult {
         const exception = self.pending_exception orelse return .not_found;
 
         // Search labels in current frame for a matching try_table
@@ -1430,7 +1473,7 @@ pub const Instance = struct {
     // parametric instructions
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-parametric-mathsf-select-t-ast
-    inline fn opSelect(self: *Self) error{CallStackExhausted}!void {
+    inline fn opSelect(self: *Self) !void {
         const c = self.stack.pop().value.asU32();
         const val2 = self.stack.pop();
         const val1 = self.stack.pop();
@@ -1440,7 +1483,7 @@ pub const Instance = struct {
     // variable instructions
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-variable-mathsf-local-get-x
-    inline fn opLocalGet(self: *Self, local_idx: LocalIdx) error{CallStackExhausted}!void {
+    inline fn opLocalGet(self: *Self, local_idx: LocalIdx) !void {
         const frame = self.stack.topFrame();
         const val = frame.locals[local_idx];
         try self.stack.push(.{ .value = val });
@@ -1454,7 +1497,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-variable-mathsf-local-tee-x
-    inline fn opLocalTee(self: *Self, local_idx: LocalIdx) error{CallStackExhausted}!void {
+    inline fn opLocalTee(self: *Self, local_idx: LocalIdx) !void {
         const value = self.stack.pop();
         try self.stack.push(value);
         try self.stack.push(value);
@@ -1462,7 +1505,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-variable-mathsf-global-get-x
-    inline fn opGlobalGet(self: *Self, global_idx: GlobalIdx) error{CallStackExhausted}!void {
+    inline fn opGlobalGet(self: *Self, global_idx: GlobalIdx) !void {
         const module = self.stack.topFrame().module;
         const a = module.global_addrs[global_idx];
         const glob = self.store.globals.items[a];
@@ -1480,7 +1523,7 @@ pub const Instance = struct {
     // table instructions
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-get-x
-    inline fn opTableGet(self: *Self, table_idx: TableIdx) (error{OutOfBoundsTableAccess} || error{CallStackExhausted})!void {
+    inline fn opTableGet(self: *Self, table_idx: TableIdx) !void {
         const module = self.stack.topFrame().module;
         const a = module.table_addrs[table_idx];
         const tab = self.store.tables.items[a];
@@ -1491,14 +1534,14 @@ pub const Instance = struct {
             @intCast(self.stack.pop().value.asU32());
 
         if (i >= tab.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         const val = tab.elem[i];
         try self.stack.push(.{ .value = Value.fromRefValue(val) });
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-set-x
-    inline fn opTableSet(self: *Self, table_idx: TableIdx) error{OutOfBoundsTableAccess}!void {
+    inline fn opTableSet(self: *Self, table_idx: TableIdx) !void {
         const module = self.stack.topFrame().module;
         const a = module.table_addrs[table_idx];
         const tab = self.store.tables.items[a];
@@ -1510,13 +1553,13 @@ pub const Instance = struct {
             @intCast(self.stack.pop().value.asU32());
 
         if (i >= tab.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         tab.elem[i] = RefValue.fromValue(val);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-size-x
-    inline fn opTableSize(self: *Self, table_idx: TableIdx) error{CallStackExhausted}!void {
+    inline fn opTableSize(self: *Self, table_idx: TableIdx) !void {
         const module = self.stack.topFrame().module;
         const ta = module.table_addrs[table_idx];
         const tab = self.store.tables.items[ta];
@@ -1528,7 +1571,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-grow-x
-    inline fn opTableGrow(self: *Self, table_idx: TableIdx) error{CallStackExhausted}!void {
+    inline fn opTableGrow(self: *Self, table_idx: TableIdx) !void {
         const module = self.stack.topFrame().module;
         const ta = module.table_addrs[table_idx];
         const tab = self.store.tables.items[ta];
@@ -1552,7 +1595,7 @@ pub const Instance = struct {
         const sz: u32 = @intCast(tab.elem.len);
 
         const new_elem = growtable(tab, n, RefValue.fromValue(val), self.allocator) catch |err| {
-            assert(err == std.mem.Allocator.Error.OutOfMemory);
+            assert(err == error.OutOfMemory);
             if (is_64) {
                 try self.stack.pushValueAs(i64, -1);
             } else {
@@ -1572,11 +1615,16 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/modules.html#growing-tables
-    inline fn growtable(table_inst: TableInst, n: u32, val: RefValue, allocator: std.mem.Allocator) error{OutOfMemory}![]RefValue {
+    inline fn growtable(
+        table_inst: TableInst,
+        n: u32,
+        val: RefValue,
+        allocator: std.mem.Allocator,
+    ) ![]RefValue {
         const table_len: u32 = @intCast(table_inst.elem.len);
         const len, const overflow = @addWithOverflow(table_len, n);
         if (overflow == 1)
-            return std.mem.Allocator.Error.OutOfMemory;
+            return error.OutOfMemory;
 
         const old_elem = table_inst.elem;
         const new_elem = try allocator.alloc(RefValue, len);
@@ -1588,7 +1636,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-fill-x
-    inline fn opTableFill(self: *Self, table_idx: TableIdx) error{OutOfBoundsTableAccess}!void {
+    inline fn opTableFill(self: *Self, table_idx: TableIdx) !void {
         const module = self.stack.topFrame().module;
         const ta = module.table_addrs[table_idx];
         const tab = self.store.tables.items[ta];
@@ -1606,7 +1654,7 @@ pub const Instance = struct {
 
         const i_plus_n, const overflow = @addWithOverflow(i, n);
         if (overflow == 1 or i_plus_n > tab.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         while (n > 0) {
             tab.elem[i] = RefValue.fromValue(val);
@@ -1616,7 +1664,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-copy-x-y
-    inline fn opTableCopy(self: *Self, arg: Instruction.TableCopyArg) (Error || error{OutOfMemory})!void {
+    inline fn opTableCopy(self: *Self, arg: Instruction.TableCopyArg) !void {
         const module = self.stack.topFrame().module;
         const ta_d = module.table_addrs[arg.table_idx_dst];
         const tab_d = self.store.tables.items[ta_d];
@@ -1640,11 +1688,11 @@ pub const Instance = struct {
 
         const s_plus_n, const overflow_sn = @addWithOverflow(s, n);
         if (overflow_sn == 1 or s_plus_n > tab_s.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         const d_plus_n, const overflow_dn = @addWithOverflow(d, n);
         if (overflow_dn == 1 or d_plus_n > tab_d.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         while (n > 0) : (n -= 1) {
             if (d <= s) {
@@ -1680,7 +1728,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-table-mathsf-table-init-x-y
-    inline fn opTableInit(self: *Self, arg: Instruction.TableInitArg) (Error || error{OutOfMemory})!void {
+    inline fn opTableInit(self: *Self, arg: Instruction.TableInitArg) !void {
         const module = self.stack.topFrame().module;
         const ta = module.table_addrs[arg.table_idx];
         const tab = self.store.tables.items[ta];
@@ -1697,11 +1745,11 @@ pub const Instance = struct {
 
         const s_plus_n, const overflow_sn = @addWithOverflow(s, n);
         if (overflow_sn == 1 or s_plus_n > elem.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         const d_plus_n, const overflow_dn = @addWithOverflow(d, @as(usize, n));
         if (overflow_dn == 1 or d_plus_n > tab.elem.len)
-            return Error.OutOfBoundsTableAccess;
+            return error.OutOfBoundsTableAccess;
 
         while (n > 0) : (n -= 1) {
             const ref_val = elem.elem[s];
@@ -1728,14 +1776,14 @@ pub const Instance = struct {
     // memory instructions
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-load-xref-syntax-instructions-syntax-memarg-mathit-memarg-and-t-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-load-n-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx-xref-syntax-instructions-syntax-memarg-mathit-memarg
-    inline fn opLoad(self: *Self, comptime T: type, comptime N: type, mem_arg: Instruction.MemArg) Error!void {
+    inline fn opLoad(self: *Self, comptime T: type, comptime N: type, mem_arg: Instruction.MemArg) !void {
         const m = try self.getMemoryAndEffectiveAddress(mem_arg.mem_idx, mem_arg.offset, @sizeOf(N));
         const val = decode.safeNumCast(N, m.mem.data[m.start..m.end]);
         try self.stack.pushValueAs(T, val);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-types-syntax-valtype-mathsf-v128-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-load-m-mathsf-x-n-xref-syntax-instructions-syntax-sx-mathit-sx-xref-syntax-instructions-syntax-memarg-mathit-memarg
-    inline fn opV128Load(self: *Self, comptime T: type, mem_arg: Instruction.MemArg) Error!void {
+    inline fn opV128Load(self: *Self, comptime T: type, mem_arg: Instruction.MemArg) !void {
         const HalfOfC = switch (std.meta.Child(T)) {
             i16 => i8,
             u16 => u8,
@@ -1762,7 +1810,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-types-syntax-valtype-mathsf-v128-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-load-n-mathsf-splat-xref-syntax-instructions-syntax-memarg-mathit-memarg
-    inline fn opV128LoadSplat(self: *Self, comptime N: type, mem_arg: Instruction.MemArg) Error!void {
+    inline fn opV128LoadSplat(self: *Self, comptime N: type, mem_arg: Instruction.MemArg) !void {
         const len = 128 / @bitSizeOf(N);
         const V = @Vector(len, N);
 
@@ -1773,7 +1821,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-types-syntax-valtype-mathsf-v128-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-load-n-mathsf-zero-xref-syntax-instructions-syntax-memarg-mathit-memarg
-    inline fn opV128LoadZero(self: *Self, comptime N: type, mem_arg: Instruction.MemArg) Error!void {
+    inline fn opV128LoadZero(self: *Self, comptime N: type, mem_arg: Instruction.MemArg) !void {
         const len = 128 / @bitSizeOf(N);
         const V = @Vector(len, N);
 
@@ -1785,23 +1833,25 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-types-syntax-valtype-mathsf-v128-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-load-n-mathsf-zero-xref-syntax-instructions-syntax-memarg-mathit-memarg
-    inline fn opV128LoadLane(self: *Self, comptime N: type, mem_arg: Instruction.MemArgWithLaneIdx) Error!void {
+    inline fn opV128LoadLane(self: *Self, comptime N: type, mem_arg: Instruction.MemArgWithLaneIdx) !void {
         const len = 128 / @bitSizeOf(N);
         const V = @Vector(len, N);
 
-        var v = self.stack.pop().value.asVec(V);
+        const v = self.stack.pop().value.asVec(V);
+        var av: [len]N = v;
 
         const m = try self.getMemoryAndEffectiveAddress(mem_arg.mem_idx, mem_arg.offset, @sizeOf(N));
-        v[mem_arg.lane_idx] = decode.safeNumCast(N, m.mem.data[m.start..m.end]);
-        try self.stack.pushValueAs(V, v);
+
+        av[mem_arg.lane_idx] = decode.safeNumCast(N, m.mem.data[m.start..m.end]);
+        try self.stack.pushValueAs(V, av);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-store-xref-syntax-instructions-syntax-memarg-mathit-memarg-and-t-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-store-n-xref-syntax-instructions-syntax-memarg-mathit-memarg
-    inline fn opStore(self: *Self, comptime T: type, comptime bit_size: u32, mem_arg: Instruction.MemArg) error{OutOfBoundsMemoryAccess}!void {
+    inline fn opStore(self: *Self, comptime T: type, comptime bit_size: u32, mem_arg: Instruction.MemArg) !void {
         // change to integer type of same size to operate bit shift
-        const IntType = std.meta.Int(.unsigned, @bitSizeOf(T));
+        const IntType = @Int(.unsigned, @bitSizeOf(T));
         const ci: IntType = @bitCast(self.stack.pop().value.as(T));
-        const DestType = std.meta.Int(.unsigned, bit_size);
+        const DestType = @Int(.unsigned, bit_size);
         const c: DestType = @truncate(ci);
         const byte_size = bit_size / 8;
 
@@ -1810,17 +1860,19 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-types-syntax-valtype-mathsf-v128-mathsf-xref-syntax-instructions-syntax-instr-memory-mathsf-store-n-mathsf-lane-xref-syntax-instructions-syntax-memarg-mathit-memarg-x
-    inline fn opV128StoreLane(self: *Self, comptime N: type, mem_arg: Instruction.MemArgWithLaneIdx) Error!void {
+    inline fn opV128StoreLane(self: *Self, comptime N: type, mem_arg: Instruction.MemArgWithLaneIdx) !void {
         const len = 128 / @bitSizeOf(N);
         const v = self.stack.pop().value.asVec(@Vector(len, N));
+        const av: [len]N = v;
+
         const byte_size = @sizeOf(N);
 
         const m = try self.getMemoryAndEffectiveAddress(mem_arg.mem_idx, mem_arg.offset, byte_size);
-        std.mem.writeInt(N, @as(*[byte_size]u8, @ptrCast(&m.mem.data[m.start])), v[mem_arg.lane_idx], .little);
+        std.mem.writeInt(N, @as(*[byte_size]u8, @ptrCast(&m.mem.data[m.start])), av[mem_arg.lane_idx], .little);
     }
 
     /// returns memory and effective address for load and store operations
-    inline fn getMemoryAndEffectiveAddress(self: *Self, mem_idx: u32, offset: u64, size: u32) error{OutOfBoundsMemoryAccess}!MemoryAndEffectiveAddress {
+    inline fn getMemoryAndEffectiveAddress(self: *Self, mem_idx: u32, offset: u64, size: u32) !MemoryAndEffectiveAddress {
         const module = self.stack.topFrame().module;
         const a = module.mem_addrs[mem_idx];
         const mem = &self.store.mems.items[a];
@@ -1832,11 +1884,11 @@ pub const Instance = struct {
 
         const ea_start = base +% offset;
         if (ea_start < base or ea_start < offset or ea_start > mem.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         const ea_end = ea_start +% @as(u64, size);
         if (ea_end < ea_start or ea_end > mem.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         return .{ .mem = mem, .start = @intCast(ea_start), .end = @intCast(ea_end) };
     }
@@ -1848,7 +1900,7 @@ pub const Instance = struct {
     };
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-size
-    inline fn opMemorySize(self: *Self, mem_idx: u32) error{CallStackExhausted}!void {
+    inline fn opMemorySize(self: *Self, mem_idx: u32) !void {
         const module = self.stack.topFrame().module;
         const mem_addr = module.mem_addrs[mem_idx];
         const mem_inst = self.store.mems.items[mem_addr];
@@ -1862,7 +1914,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-grow
-    inline fn opMemoryGrow(self: *Self, mem_idx: u32) error{CallStackExhausted}!void {
+    inline fn opMemoryGrow(self: *Self, mem_idx: u32) !void {
         const module = self.stack.topFrame().module;
         const mem_addr = module.mem_addrs[mem_idx];
         const mem_inst = self.store.mems.items[mem_addr];
@@ -1892,7 +1944,7 @@ pub const Instance = struct {
         };
 
         const new_data = growmem(mem_inst, n32, self.allocator) catch |err| {
-            assert(err == std.mem.Allocator.Error.OutOfMemory);
+            assert(err == error.OutOfMemory);
             if (is_64) {
                 try self.stack.pushValueAs(i64, -1);
             } else {
@@ -1911,11 +1963,11 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/modules.html#growing-memories
-    fn growmem(mem_inst: MemInst, n: u32, allocator: std.mem.Allocator) error{OutOfMemory}![]u8 {
+    fn growmem(mem_inst: MemInst, n: u32, allocator: std.mem.Allocator) ![]u8 {
         const data_len: u32 = @intCast(mem_inst.data.len / page_size);
         const len: u32 = data_len + n;
         if (len + n > 65536)
-            return std.mem.Allocator.Error.OutOfMemory;
+            return error.OutOfMemory;
 
         const old_data = mem_inst.data;
         const new_data = try allocator.alloc(u8, len * page_size);
@@ -1927,7 +1979,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-fill
-    inline fn opMemoryFill(self: *Self, mem_idx: u32) (Error || error{OutOfMemory})!void {
+    inline fn opMemoryFill(self: *Self, mem_idx: u32) !void {
         const module = self.stack.topFrame().module;
         const mem_addr = module.mem_addrs[mem_idx];
         const mem_inst = &self.store.mems.items[mem_addr];
@@ -1939,7 +1991,7 @@ pub const Instance = struct {
 
         const d_plus_n = d +% n;
         if (d_plus_n < d or d_plus_n > mem_inst.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         const d_usize: usize = @intCast(d);
         const d_plus_n_usize: usize = @intCast(d_plus_n);
@@ -1947,7 +1999,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-copy
-    inline fn opMemoryCopy(self: *Self, mem_idx_dst: u32, mem_idx_src: u32) (Error || error{OutOfMemory})!void {
+    inline fn opMemoryCopy(self: *Self, mem_idx_dst: u32, mem_idx_src: u32) !void {
         const module = self.stack.topFrame().module;
         const mem_addr_dst = module.mem_addrs[mem_idx_dst];
         const mem_addr_src = module.mem_addrs[mem_idx_src];
@@ -1963,11 +2015,11 @@ pub const Instance = struct {
 
         const s_plus_n = s +% n;
         if (s_plus_n < s or s_plus_n > mem_inst_src.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         const d_plus_n = d +% n;
         if (d_plus_n < d or d_plus_n > mem_inst_dst.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         const d_usize: usize = @intCast(d);
         const s_usize: usize = @intCast(s);
@@ -1996,7 +2048,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-memory-init-x
-    inline fn opMemoryInit(self: *Self, data_idx: u32, mem_idx: u32) (Error || error{OutOfMemory})!void {
+    inline fn opMemoryInit(self: *Self, data_idx: u32, mem_idx: u32) !void {
         const module = self.stack.topFrame().module;
         const mem_addr = module.mem_addrs[mem_idx];
         const mem_inst = &self.store.mems.items[mem_addr];
@@ -2010,16 +2062,16 @@ pub const Instance = struct {
 
         const s_plus_n = s +% n;
         if (s_plus_n < s or s_plus_n > data.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         const d_plus_n = d +% n;
         if (d_plus_n < d or d_plus_n > mem_inst.data.len)
-            return Error.OutOfBoundsMemoryAccess;
+            return error.OutOfBoundsMemoryAccess;
 
         const d_usize: usize = @intCast(d);
         const s_usize: usize = @intCast(s);
         const n_usize: usize = @intCast(n);
-        @memcpy(mem_inst.data[d_usize..d_usize + n_usize], data.data[s_usize..s_usize + n_usize]);
+        @memcpy(mem_inst.data[d_usize .. d_usize + n_usize], data.data[s_usize .. s_usize + n_usize]);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-instr-memory-mathsf-data-drop-x
@@ -2034,7 +2086,7 @@ pub const Instance = struct {
     // numeric instructions
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-unop-mathit-unop
-    inline fn unOp(self: *Self, comptime T: type, comptime f: fn (type, T) T) error{CallStackExhausted}!void {
+    inline fn unOp(self: *Self, comptime T: type, comptime f: fn (type, T) T) !void {
         const value = self.stack.pop().value.as(T);
         const result = f(T, value);
         try self.stack.pushValueAs(T, result);
@@ -2049,14 +2101,14 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-testop-mathit-testop
-    inline fn testOp(self: *Self, comptime T: type, comptime f: fn (type, T) i32) error{CallStackExhausted}!void {
+    inline fn testOp(self: *Self, comptime T: type, comptime f: fn (type, T) i32) !void {
         const value = self.stack.pop().value.as(T);
         const result = f(T, value);
         try self.stack.pushValueAs(i32, result);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-xref-syntax-instructions-syntax-relop-mathit-relop
-    inline fn relOp(self: *Self, comptime T: type, comptime f: fn (type, T, T) bool) error{CallStackExhausted}!void {
+    inline fn relOp(self: *Self, comptime T: type, comptime f: fn (type, T, T) bool) !void {
         const rhs: T = self.stack.pop().value.as(T);
         const lhs: T = self.stack.pop().value.as(T);
         const result: i32 = if (f(T, lhs, rhs)) 1 else 0;
@@ -2064,7 +2116,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-xref-syntax-instructions-syntax-cvtop-mathit-cvtop-mathsf-t-1-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx
-    inline fn cvtOp(self: *Self, comptime R: type, comptime T: type, comptime f: fn (type, type, T) R) error{CallStackExhausted}!void {
+    inline fn cvtOp(self: *Self, comptime R: type, comptime T: type, comptime f: fn (type, type, T) R) !void {
         const value = self.stack.pop().value.as(T);
         const result: R = f(R, T, value);
         try self.stack.pushValueAs(R, result);
@@ -2079,13 +2131,13 @@ pub const Instance = struct {
     // SIMD ops
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-shape-mathit-shape-mathsf-xref-syntax-instructions-syntax-vunop-mathit-vunop
-    inline fn vUnOp(self: *Self, comptime T: type, comptime f: fn (type, T) T) error{CallStackExhausted}!void {
+    inline fn vUnOp(self: *Self, comptime T: type, comptime f: fn (type, T) T) !void {
         const value = self.stack.pop().value.asVec(T);
         const result = f(T, value);
         try self.stack.pushValueAs(T, result);
     }
 
-    inline fn vUnOpEx(self: *Self, comptime T: type, comptime f: fn (type, std.meta.Child(T)) T) error{CallStackExhausted}!void {
+    inline fn vUnOpEx(self: *Self, comptime T: type, comptime f: fn (type, std.meta.Child(T)) T) !void {
         const value = self.stack.pop().value.asVec(T);
 
         const vec_len = @typeInfo(T).vector.len;
@@ -2104,7 +2156,11 @@ pub const Instance = struct {
         try self.stack.pushValueAs(T, result);
     }
 
-    inline fn vBinTryOpEx(self: *Self, comptime T: type, comptime f: fn (type, std.meta.Child(T), std.meta.Child(T)) Error!std.meta.Child(T)) Error!void {
+    inline fn vBinTryOpEx(
+        self: *Self,
+        comptime T: type,
+        comptime f: fn (type, std.meta.Child(T), std.meta.Child(T)) Error!std.meta.Child(T),
+    ) !void {
         const rhs = self.stack.pop().value.asVec(T);
         const lhs = self.stack.pop().value.asVec(T);
 
@@ -2117,7 +2173,7 @@ pub const Instance = struct {
     }
 
     // v128.bitselect is a only member of v128.vvternop
-    inline fn vBitSelect(self: *Self) Error!void {
+    inline fn vBitSelect(self: *Self) !void {
         const v3 = self.stack.pop().value.as(u128);
         const v2 = self.stack.pop().value.as(u128);
         const v1 = self.stack.pop().value.as(u128);
@@ -2126,7 +2182,7 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: madd (a * b + c)
-    inline fn vRelaxedMadd(self: *Self, comptime T: type) Error!void {
+    inline fn vRelaxedMadd(self: *Self, comptime T: type) !void {
         const c = self.stack.pop().value.asVec(T);
         const b = self.stack.pop().value.asVec(T);
         const a = self.stack.pop().value.asVec(T);
@@ -2135,7 +2191,7 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: nmadd (-(a * b) + c)
-    inline fn vRelaxedNmadd(self: *Self, comptime T: type) Error!void {
+    inline fn vRelaxedNmadd(self: *Self, comptime T: type) !void {
         const c = self.stack.pop().value.asVec(T);
         const b = self.stack.pop().value.asVec(T);
         const a = self.stack.pop().value.asVec(T);
@@ -2144,9 +2200,9 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: laneselect (bitwise select per lane)
-    inline fn vRelaxedLaneselect(self: *Self, comptime T: type) Error!void {
+    inline fn vRelaxedLaneselect(self: *Self, comptime T: type) !void {
         const C = std.meta.Child(T);
-        const IntT = @Vector(@typeInfo(T).vector.len, std.meta.Int(.unsigned, @bitSizeOf(C)));
+        const IntT = @Vector(@typeInfo(T).vector.len, @Int(.unsigned, @bitSizeOf(C)));
         const c = self.stack.pop().value.asVec(T);
         const b = self.stack.pop().value.asVec(T);
         const a = self.stack.pop().value.asVec(T);
@@ -2159,7 +2215,7 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: i16x8.relaxed_q15mulr_s
-    inline fn vRelaxedQ15mulr(self: *Self) Error!void {
+    inline fn vRelaxedQ15mulr(self: *Self) !void {
         const b = self.stack.pop().value.asVec(@Vector(8, i16));
         const a = self.stack.pop().value.asVec(@Vector(8, i16));
         var result: @Vector(8, i16) = undefined;
@@ -2171,7 +2227,7 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: i16x8.relaxed_dot_i8x16_i7x16_s
-    inline fn vRelaxedDotI8x16(self: *Self) Error!void {
+    inline fn vRelaxedDotI8x16(self: *Self) !void {
         const b = self.stack.pop().value.asVec(@Vector(16, i8));
         const a = self.stack.pop().value.asVec(@Vector(16, i8));
         var result: @Vector(8, i16) = undefined;
@@ -2185,7 +2241,7 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: i32x4.relaxed_dot_i8x16_i7x16_add_s
-    inline fn vRelaxedDotI8x16Add(self: *Self) Error!void {
+    inline fn vRelaxedDotI8x16Add(self: *Self) !void {
         const c = self.stack.pop().value.asVec(@Vector(4, i32));
         const b = self.stack.pop().value.asVec(@Vector(16, i8));
         const a = self.stack.pop().value.asVec(@Vector(16, i8));
@@ -2202,7 +2258,7 @@ pub const Instance = struct {
     }
 
     /// Relaxed SIMD: f32x4.relaxed_dot_bf16x8_add_f32x4
-    inline fn vRelaxedDotBf16(self: *Self) Error!void {
+    inline fn vRelaxedDotBf16(self: *Self) !void {
         const c = self.stack.pop().value.asVec(@Vector(4, f32));
         const b = self.stack.pop().value.asVec(@Vector(8, u16));
         const a = self.stack.pop().value.asVec(@Vector(8, u16));
@@ -2224,81 +2280,102 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-types-syntax-valtype-mathsf-v128-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-any-true
-    inline fn vAnyTrue(self: *Self) Error!void {
+    inline fn vAnyTrue(self: *Self) !void {
         const value = self.stack.pop().value.as(u128);
         const result: i32 = if (value == 0) 0 else 1;
         try self.stack.pushValueAs(i32, result);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#mathsf-i8x16-xref-syntax-instructions-syntax-instr-vec-mathsf-swizzle
-    inline fn swizzle(self: *Self) Error!void {
+    inline fn swizzle(self: *Self) !void {
         const Vec = @Vector(16, u8);
         const c2 = self.stack.pop().value.asVec(Vec);
         const c1 = self.stack.pop().value.asVec(Vec);
 
+        const a1: [16]u8 = c1;
+
         var result: Vec = undefined;
         inline for (0..16) |i| {
             const idx = c2[i];
-            result[i] = if (idx < 16) c1[idx] else 0;
+            result[i] =
+                if (idx < 16)
+                    a1[idx]
+                else
+                    0;
         }
         try self.stack.pushValueAs(@Vector(16, u8), result);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#mathsf-i8x16-xref-syntax-instructions-syntax-instr-vec-mathsf-shuffle-x-ast
-    inline fn shuffle(self: *Self, lane_idxs: [16]u8) Error!void {
+    inline fn shuffle(self: *Self, lane_idxs: [16]u8) !void {
         const Vec = @Vector(16, u8);
         const c2 = self.stack.pop().value.asVec(Vec);
         const c1 = self.stack.pop().value.asVec(Vec);
+
+        const a1: [16]u8 = c1;
+        const a2: [16]u8 = c2;
 
         var result: @Vector(16, u8) = undefined;
         inline for (0..16) |i| {
             const idx = lane_idxs[i];
             assert(idx < 32);
-            result[i] = if (idx < 16) c1[idx] else c2[idx - 16];
+
+            result[i] =
+                if (idx < 16)
+                    a1[idx]
+                else
+                    a2[idx - 16];
         }
         try self.stack.pushValueAs(Vec, result);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-shape-mathit-shape-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-splat
-    inline fn opVSplat(self: *Self, comptime S: type, comptime T: type) Error!void {
+    inline fn opVSplat(self: *Self, comptime S: type, comptime T: type) !void {
         const c1 = self.stack.pop().value.as(S);
         const C = std.meta.Child(T);
+
         const val: C = if (S == f32 or S == f64) c1 else @intCast(c1 & std.math.maxInt(C));
         const result: T = @splat(val);
+
         try self.stack.pushValueAs(T, result);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-1-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-extract-lane-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx-x
-    inline fn extractLane(self: *Self, comptime R: type, comptime T: type, lane_idx: u8) Error!void {
+    inline fn extractLane(self: *Self, comptime R: type, comptime T: type, lane_idx: u8) !void {
         const t_len = @typeInfo(T).vector.len;
         assert(lane_idx < t_len);
+
         const c1 = self.stack.pop().value.asVec(T);
-        const c2 = c1[lane_idx];
+        const a1: [t_len]std.meta.Child(T) = c1;
+        const c2 = a1[lane_idx];
+
         try self.stack.pushValueAs(R, c2);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-shape-mathit-shape-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-replace-lane-x
-    inline fn replaceLane(self: *Self, comptime R: type, comptime T: type, lane_idx: u8) Error!void {
+    inline fn replaceLane(self: *Self, comptime R: type, comptime T: type, lane_idx: u8) !void {
         const t_len = @typeInfo(T).vector.len;
         assert(lane_idx < t_len);
         const c2 = self.stack.pop().value.as(R);
         const C = std.meta.Child(T);
         const val: C = if (R == f32 or R == f64) c2 else @intCast(c2 & std.math.maxInt(C));
 
-        var c1 = self.stack.pop().value.asVec(T);
-        c1[lane_idx] = val;
-        try self.stack.pushValueAs(T, c1);
+        const c1 = self.stack.pop().value.asVec(T);
+        var a1: [t_len]C = c1;
+        a1[lane_idx] = val;
+
+        try self.stack.pushValueAs(T, a1);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-vrelop-mathit-vrelop
-    inline fn vRelOpEx(self: *Self, comptime T: type, comptime f: fn (type, std.meta.Child(T), std.meta.Child(T)) bool) error{CallStackExhausted}!void {
+    inline fn vRelOpEx(self: *Self, comptime T: type, comptime f: fn (type, std.meta.Child(T), std.meta.Child(T)) bool) !void {
         @setEvalBranchQuota(2000);
 
         const rhs = self.stack.pop().value.asVec(T);
         const lhs = self.stack.pop().value.asVec(T);
 
         const vec_len = @typeInfo(T).vector.len;
-        const I = std.meta.Int(.unsigned, @bitSizeOf(std.meta.Child(T)));
+        const I = @Int(.unsigned, @bitSizeOf(std.meta.Child(T)));
         const R = @Vector(vec_len, I);
         var result: R = undefined;
         inline for (0..vec_len) |i| {
@@ -2325,17 +2402,19 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#xref-syntax-instructions-syntax-shape-mathit-shape-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-all-true
-    inline fn vAllTrue(self: *Self, comptime T: type) Error!void {
+    inline fn vAllTrue(self: *Self, comptime T: type) !void {
         const zero_vec: T = @splat(0);
         const value = self.stack.pop().value.asVec(T);
+
         const comp_result = zero_vec != value;
         const reduce_result = @reduce(.And, comp_result);
+
         const result: i32 = if (reduce_result) 1 else 0;
         try self.stack.pushValueAs(i32, result);
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-bitmask
-    inline fn vBitmask(self: *Self, comptime T: type) Error!void {
+    inline fn vBitmask(self: *Self, comptime T: type) !void {
         const vec_len = @typeInfo(T).vector.len;
         const zero_vec: T = @splat(0);
 
@@ -2350,7 +2429,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-narrow-mathsf-t-1-mathsf-x-m-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx
-    inline fn vNarrow(self: *Self, comptime R: type, comptime T: type) Error!void {
+    inline fn vNarrow(self: *Self, comptime R: type, comptime T: type) !void {
         const r_len = @typeInfo(R).vector.len;
         const t_len = @typeInfo(T).vector.len;
         comptimeAssert(r_len == t_len * 2);
@@ -2370,7 +2449,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-vcvtop-mathit-vcvtop-mathsf-t-1-mathsf-x-m-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx
-    inline fn vCvtOpEx(self: *Self, comptime R: type, comptime T: type, comptime f: fn (type, type, std.meta.Child(T)) std.meta.Child(R)) error{CallStackExhausted}!void {
+    inline fn vCvtOpEx(self: *Self, comptime R: type, comptime T: type, comptime f: fn (type, type, std.meta.Child(T)) std.meta.Child(R)) !void {
         const value = self.stack.pop().value.asVec(T);
 
         const t_len = @typeInfo(T).vector.len;
@@ -2395,7 +2474,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-vcvtop-mathit-vcvtop-mathsf-xref-syntax-instructions-syntax-half-mathit-half-mathsf-t-1-mathsf-x-m-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx
-    inline fn vCvtOpHalfEx(self: *Self, comptime offset: u8, comptime R: type, comptime T: type, comptime f: fn (type, type, std.meta.Child(T)) std.meta.Child(R)) error{CallStackExhausted}!void {
+    inline fn vCvtOpHalfEx(self: *Self, comptime offset: u8, comptime R: type, comptime T: type, comptime f: fn (type, type, std.meta.Child(T)) std.meta.Child(R)) !void {
         @setEvalBranchQuota(3000);
 
         const value = self.stack.pop().value.asVec(T);
@@ -2413,7 +2492,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-vcvtop-mathit-vcvtop-mathsf-t-1-mathsf-x-m-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx-mathsf-zero
-    inline fn vCvtOpZeroEx(self: *Self, comptime R: type, comptime T: type, comptime f: fn (type, type, std.meta.Child(T)) std.meta.Child(R)) Error!void {
+    inline fn vCvtOpZeroEx(self: *Self, comptime R: type, comptime T: type, comptime f: fn (type, type, std.meta.Child(T)) std.meta.Child(R)) !void {
         const r_len = @typeInfo(R).vector.len;
         const t_len = @typeInfo(T).vector.len;
         comptimeAssert(r_len == t_len * 2);
@@ -2428,7 +2507,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#mathsf-i32x4-xref-syntax-instructions-syntax-instr-vec-mathsf-dot-mathsf-i16x8-s
-    inline fn vDot(self: *Self, comptime R: type, comptime T: type) error{CallStackExhausted}!void {
+    inline fn vDot(self: *Self, comptime R: type, comptime T: type) !void {
         const r_len = @typeInfo(R).vector.len;
         const t_len = @typeInfo(T).vector.len;
         comptimeAssert(r_len * 2 == t_len);
@@ -2447,7 +2526,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-extmul-mathsf-xref-syntax-instructions-syntax-half-mathit-half-mathsf-t-1-mathsf-x-m-mathsf-xref-syntax-instructions-syntax-sx-mathit-sx
-    inline fn vExtmulHalf(self: *Self, comptime offset: u8, comptime R: type, comptime T: type) error{CallStackExhausted}!void {
+    inline fn vExtmulHalf(self: *Self, comptime offset: u8, comptime R: type, comptime T: type) !void {
         const r_len = @typeInfo(R).vector.len;
         const t_len = @typeInfo(T).vector.len;
         comptimeAssert(r_len * 2 == t_len);
@@ -2468,7 +2547,7 @@ pub const Instance = struct {
     }
 
     /// https://webassembly.github.io/spec/core/exec/instructions.html#t-2-mathsf-x-n-mathsf-xref-syntax-instructions-syntax-instr-vec-mathsf-extadd-pairwise-t-1-mathsf-x-m-xref-syntax-instructions-syntax-sx-mathit-sx
-    inline fn vExtaddPairwise(self: *Self, comptime R: type, comptime T: type) error{CallStackExhausted}!void {
+    inline fn vExtaddPairwise(self: *Self, comptime R: type, comptime T: type) !void {
         const r_len = @typeInfo(R).vector.len;
         const t_len = @typeInfo(T).vector.len;
         comptimeAssert(r_len * 2 == t_len);
@@ -2555,7 +2634,7 @@ const FlowControl = union(enum) {
         }
     }
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             inline else => |val| if (@TypeOf(val) == void) {
                 try writer.print("{s}", .{@tagName(self)});
@@ -2623,14 +2702,14 @@ fn intSat(comptime R: type, comptime T: type, value: T) R {
 
 fn opTrunc(comptime R: type, comptime T: type, value: T) Error!R {
     if (std.math.isNan(value))
-        return Error.InvalidConversionToInteger;
+        return error.InvalidConversionToInteger;
     if (std.math.isNegativeInf(value))
-        return Error.IntegerOverflow;
+        return error.IntegerOverflow;
     if (std.math.isPositiveInf(value))
-        return Error.IntegerOverflow;
+        return error.IntegerOverflow;
 
     if (!canConvert(R, T, value))
-        return Error.IntegerOverflow;
+        return error.IntegerOverflow;
 
     return @intFromFloat(value);
 }
@@ -2761,14 +2840,14 @@ fn opIntMul(comptime T: type, lhs: T, rhs: T) Error!T {
 }
 
 fn opIntDivS(comptime T: type, lhs: T, rhs: T) Error!T {
-    if (T == i32 and lhs == -2147483648 and rhs == -1) return Error.IntegerOverflow;
-    if (T == i64 and lhs == -9223372036854775808 and rhs == -1) return Error.IntegerOverflow;
-    if (rhs == 0) return Error.IntegerDivideByZero;
+    if (T == i32 and lhs == -2147483648 and rhs == -1) return error.IntegerOverflow;
+    if (T == i64 and lhs == -9223372036854775808 and rhs == -1) return error.IntegerOverflow;
+    if (rhs == 0) return error.IntegerDivideByZero;
     return @divTrunc(lhs, rhs);
 }
 
 fn opIntDivU(comptime T: type, lhs: T, rhs: T) Error!T {
-    if (rhs == 0) return Error.IntegerDivideByZero;
+    if (rhs == 0) return error.IntegerDivideByZero;
     if (T == i32 and lhs == 2147483648 and rhs == 4294967295) return 0;
     if (T == i64 and lhs == 9223372036854775808 and rhs == 18446744073709551615) return 0;
     const res = @divTrunc(lhs, rhs);
@@ -2780,7 +2859,7 @@ fn opIntAndNot(comptime T: type, lhs: T, rhs: T) Error!T {
 }
 
 fn opIntRem(comptime T: type, lhs: T, rhs: T) Error!T {
-    if (rhs == 0) return Error.IntegerDivideByZero;
+    if (rhs == 0) return error.IntegerDivideByZero;
     return @rem(lhs, rhs);
 }
 
@@ -2810,14 +2889,14 @@ fn opIntShrU(comptime T: type, lhs: T, rhs: T) Error!T {
 }
 
 fn opIntRotl(comptime T: type, lhs: T, rhs: T) Error!T {
-    const UnsignedType = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const UnsignedType = @Int(.unsigned, @bitSizeOf(T));
     const num: UnsignedType = @bitCast(lhs);
     const res = std.math.rotl(UnsignedType, num, rhs);
     return @bitCast(res);
 }
 
 fn opIntRotr(comptime T: type, lhs: T, rhs: T) Error!T {
-    const UnsignedType = std.meta.Int(.unsigned, @bitSizeOf(T));
+    const UnsignedType = @Int(.unsigned, @bitSizeOf(T));
     const num: UnsignedType = @bitCast(lhs);
     const res = std.math.rotr(UnsignedType, num, rhs);
     return @bitCast(res);
@@ -3092,6 +3171,7 @@ test opFloatNearest {
 test "Relaxed SIMD: i8x16.relaxed_swizzle" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     // Push test vectors
     const v1: @Vector(16, u8) = .{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 };
@@ -3111,6 +3191,7 @@ test "Relaxed SIMD: i8x16.relaxed_swizzle" {
 test "Relaxed SIMD: f32x4.relaxed_madd" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     const a: @Vector(4, f32) = .{ 2.0, 3.0, 4.0, 5.0 };
     const b: @Vector(4, f32) = .{ 10.0, 20.0, 30.0, 40.0 };
@@ -3131,6 +3212,7 @@ test "Relaxed SIMD: f32x4.relaxed_madd" {
 test "Relaxed SIMD: f32x4.relaxed_nmadd" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     const a: @Vector(4, f32) = .{ 2.0, 3.0, 4.0, 5.0 };
     const b: @Vector(4, f32) = .{ 10.0, 20.0, 30.0, 40.0 };
@@ -3151,6 +3233,7 @@ test "Relaxed SIMD: f32x4.relaxed_nmadd" {
 test "Relaxed SIMD: i32x4.relaxed_laneselect" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     const a: @Vector(4, u32) = .{ 0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD };
     const b: @Vector(4, u32) = .{ 0x11111111, 0x22222222, 0x33333333, 0x44444444 };
@@ -3171,6 +3254,7 @@ test "Relaxed SIMD: i32x4.relaxed_laneselect" {
 test "Relaxed SIMD: i16x8.relaxed_q15mulr_s" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     const a: @Vector(8, i16) = .{ 16384, 8192, 4096, 2048, 1024, 512, 256, 128 };
     const b: @Vector(8, i16) = .{ 16384, 16384, 16384, 16384, 16384, 16384, 16384, 16384 };
@@ -3188,6 +3272,7 @@ test "Relaxed SIMD: i16x8.relaxed_q15mulr_s" {
 test "Relaxed SIMD: i16x8.relaxed_dot_i8x16_i7x16_s" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     const a: @Vector(16, i8) = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     const b: @Vector(16, i8) = .{ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
@@ -3206,6 +3291,7 @@ test "Relaxed SIMD: i16x8.relaxed_dot_i8x16_i7x16_s" {
 test "Relaxed SIMD: i32x4.relaxed_trunc_f32x4_s" {
     const allocator = std.testing.allocator;
     var instance = Instance.new(allocator, false);
+    defer instance.deinit();
 
     const v: @Vector(4, f32) = .{ 1.5, -2.7, 100.9, -200.1 };
     try instance.stack.pushValueAs(@Vector(4, f32), v);

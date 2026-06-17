@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("wasm-core");
 const CallStackExhausted = @import("./errors.zig").Error.CallStackExhausted;
+const RuntimeError = @import("./errors.zig").Error;
 const Error = error{CallStackExhausted};
 pub const ModuleInst = @import("./module_instance.zig").ModuleInst;
 
@@ -24,6 +25,16 @@ pub const Store = struct {
             .tags = .empty,
         };
     }
+
+    pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
+        self.funcs.deinit(allocator);
+        self.tables.deinit(allocator);
+        self.mems.deinit(allocator);
+        self.globals.deinit(allocator);
+        self.elems.deinit(allocator);
+        self.datas.deinit(allocator);
+        self.tags.deinit(allocator);
+    }
 };
 
 pub const Stack = struct {
@@ -40,28 +51,32 @@ pub const Stack = struct {
         };
     }
 
-    inline fn checkStackExhausted(self: Self) Error!void {
+    pub fn deinit(self: *Self) void {
+        self.array.deinit(self.allocator);
+    }
+
+    inline fn checkStackExhausted(self: Self) !void {
         if (self.array.items.len > max_stack_size)
             return CallStackExhausted;
     }
 
-    pub fn pushValueAs(self: *Self, comptime T: type, value: T) Error!void {
+    pub fn pushValueAs(self: *Self, comptime T: type, value: T) !void {
         const val = Value.from(value);
         self.array.append(self.allocator, .{ .value = val }) catch return CallStackExhausted;
         try self.checkStackExhausted();
     }
 
-    pub fn push(self: *Self, value: StackItem) Error!void {
+    pub fn push(self: *Self, value: StackItem) !void {
         self.array.append(self.allocator, value) catch return CallStackExhausted;
         try self.checkStackExhausted();
     }
 
-    pub fn appendSlice(self: *Self, values: []const StackItem) Error!void {
+    pub fn appendSlice(self: *Self, values: []const StackItem) !void {
         self.array.appendSlice(self.allocator, values) catch return CallStackExhausted;
         try self.checkStackExhausted();
     }
 
-    pub fn insertAt(self: *Self, index_from_top: usize, value: StackItem) Error!void {
+    pub fn insertAt(self: *Self, index_from_top: usize, value: StackItem) !void {
         const pos = self.array.items.len - index_from_top;
         self.array.insert(self.allocator, pos, value) catch return CallStackExhausted;
         try self.checkStackExhausted();
@@ -86,7 +101,7 @@ pub const Stack = struct {
     }
 
     /// pops values until `popped_values` is full
-    pub fn popValues(self: *Self, popped_values: *[]StackItem) Error!void {
+    pub fn popValues(self: *Self, popped_values: *[]StackItem) !void {
         const len = self.array.items.len;
         const num_items = popped_values.len;
         const new_len = len - num_items;
@@ -177,10 +192,23 @@ pub const DataAddr = u32;
 pub const ExternAddr = u32;
 pub const TagAddr = u32;
 
+pub const HostFunction = struct {
+    context: ?*anyopaque = null,
+    callback: *const fn (?*anyopaque, *Store, []const Value, std.mem.Allocator) HostFunctionError![]const Value,
+};
+
+pub const HostFunctionError = RuntimeError || error{
+    InvalidHostCall,
+    MemoryOutOfBounds,
+    MissingMemory,
+    UnsupportedFd,
+};
+
 pub const FuncInst = struct {
     type: core.types.FuncType,
-    module: *ModuleInst,
-    code: core.types.Func,
+    module: ?*ModuleInst = null,
+    code: ?core.types.Func = null,
+    host: ?HostFunction = null,
 };
 
 pub const TableInst = struct {
@@ -338,7 +366,7 @@ pub const Value = union(core.types.ValueType) {
         };
     }
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .i32 => |val| try writer.print("{d}_i32", .{val}),
             .i64 => |val| try writer.print("{d}_i64", .{val}),
@@ -406,7 +434,7 @@ pub const Label = struct {
     arity: u32,
     type: LabelType,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{f} (arity = {d})", .{ self.type, self.arity });
     }
 };
@@ -430,7 +458,7 @@ pub const LabelType = union(enum) {
     loop: core.types.InstructionAddr,
     try_table: TryTableLabel,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .try_table => |tt| try writer.print("try_table ({d})", .{tt.end_addr}),
             inline else => |addr| if (@TypeOf(addr) == void) {

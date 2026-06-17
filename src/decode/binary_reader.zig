@@ -16,72 +16,72 @@ pub const BinaryReader = struct {
         return self.position >= self.buffer.len;
     }
 
-    pub fn peek(self: Self) error{UnexpectedEndOfBuffer}!u8 {
+    pub fn peek(self: Self) !u8 {
         if (self.eof())
-            return Error.UnexpectedEndOfBuffer;
+            return error.UnexpectedEndOfBuffer;
 
         return self.buffer[self.position];
     }
 
-    fn ensureHasBytes(self: Self, len: usize) error{UnexpectedEndOfBuffer}!void {
+    fn ensureHasBytes(self: Self, len: usize) !void {
         if (self.position + len > self.buffer.len)
-            return Error.UnexpectedEndOfBuffer;
+            return error.UnexpectedEndOfBuffer;
     }
 
-    pub fn readBytes(self: *Self, size: usize) error{UnexpectedEndOfBuffer}![]const u8 {
+    pub fn readBytes(self: *Self, size: usize) ![]const u8 {
         try self.ensureHasBytes(size);
         const start = self.position;
         self.position += size;
         return self.buffer[start..self.position];
     }
 
-    pub fn readI128(reader: *BinaryReader) Error!i128 {
+    pub fn readI128(reader: *BinaryReader) !i128 {
         const buf = try reader.readBytes(16);
         const val: i128 = std.mem.readInt(i128, @as(*[16]u8, @ptrCast(@constCast(&buf[0]))), .little);
         return val;
     }
 
-    pub fn readU32(self: *Self) error{UnexpectedEndOfBuffer}!u32 {
+    pub fn readU32(self: *Self) !u32 {
         return try self.readNumber(u32);
     }
 
-    pub fn readU8(self: *Self) error{UnexpectedEndOfBuffer}!u8 {
+    pub fn readU8(self: *Self) !u8 {
         try self.ensureHasBytes(1);
         const ch = self.buffer[self.position];
         self.position += 1;
         return ch;
     }
 
-    pub fn readF32(self: *Self) error{UnexpectedEndOfBuffer}!f32 {
+    pub fn readF32(self: *Self) !f32 {
         return try self.readNumber(f32);
     }
 
-    pub fn readF64(self: *Self) error{UnexpectedEndOfBuffer}!f64 {
+    pub fn readF64(self: *Self) !f64 {
         return try self.readNumber(f64);
     }
 
-    fn readNumber(self: *Self, comptime T: type) error{UnexpectedEndOfBuffer}!T {
+    fn readNumber(self: *Self, comptime T: type) !T {
         const buffer = try self.readBytes(@sizeOf(T));
         return utils.safeNumCast(T, buffer);
     }
 
-    pub fn readVarU32(self: *Self) Error!u32 {
+    pub fn readVarU32(self: *Self) !u32 {
         return self.readLeb(u32);
     }
 
-    pub fn readVarI32(self: *Self) Error!i32 {
+    pub fn readVarI32(self: *Self) !i32 {
         return self.readLeb(i32);
     }
 
-    pub fn readVarU64(self: *Self) Error!u64 {
+    pub fn readVarU64(self: *Self) !u64 {
         return self.readLeb(u64);
     }
 
-    pub fn readVarI64(self: *Self) Error!i64 {
+    pub fn readVarI64(self: *Self) !i64 {
         return self.readLeb(i64);
     }
 
-    fn readLeb(self: *Self, comptime NumType: type) Error!NumType {
+    fn readLeb(self: *Self, comptime NumType: type) !NumType {
         if (NumType != i32 and NumType != u32 and NumType != i64 and NumType != u64)
             @compileError("Unknown Number Type");
 
@@ -109,11 +109,10 @@ pub const BinaryReader = struct {
                 }
             }
         }
-        unreachable;
     }
 };
 
-inline fn checkIntegerTooLarge(comptime NumType: type, byte: u8) (error{IntegerRepresentationTooLong} || error{IntegerTooLarge})!void {
+inline fn checkIntegerTooLarge(comptime NumType: type, byte: u8) !void {
     const too_large = switch (NumType) {
         u32 => byte & 0xf0 > 0,
         u64 => byte & 0xfe > 0,
@@ -131,10 +130,10 @@ inline fn checkIntegerTooLarge(comptime NumType: type, byte: u8) (error{IntegerR
     };
 
     if (byte & 0x80 > 0)
-        return Error.IntegerRepresentationTooLong;
+        return error.IntegerRepresentationTooLong;
 
     if (too_large)
-        return Error.IntegerTooLarge;
+        return error.IntegerTooLarge;
 }
 
 test BinaryReader {

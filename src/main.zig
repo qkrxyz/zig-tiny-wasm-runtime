@@ -3,35 +3,34 @@ const runtime = @import("wasm-runtime");
 
 const Value = runtime.types.Value;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.arena.allocator();
+
     var verbose: bool = false;
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var wasm_files = std.array_list.Managed([]const u8).init(allocator);
+    var wasm_files = std.array_list.Managed([]const u8).init(gpa);
     var func_name: ?[]const u8 = null;
-    var wasm_args = std.array_list.Managed(Value).init(allocator);
+    var wasm_args = std.array_list.Managed(Value).init(gpa);
 
-    var pos: usize = 1;
-    while (pos < std.os.argv.len) : (pos += 1) {
-        const arg: []const u8 = std.mem.span(std.os.argv[pos]);
+    var iterator = try init.minimal.args.iterateAllocator(gpa);
+    _ = iterator.skip();
+    while (iterator.next()) |arg| {
+        // const arg: []const u8 = std.mem.span(std.os.argv[pos]);
         if (strcmp(arg, "-v")) {
             verbose = true;
         } else if (strcmp(arg, "-r")) {
-            pos += 1;
-            func_name = std.mem.span(std.os.argv[pos]);
+            func_name = iterator.next().?;
+            // func_name = std.mem.span(std.os.argv[pos]);
         } else if (strcmp(arg, "-a")) {
-            pos += 1;
-            const val = try parseValue(std.mem.span(std.os.argv[pos]));
+            // pos += 1;
+            const val = try parseValue(iterator.next().?);
             try wasm_args.append(val);
         } else {
-            try wasm_files.append(std.mem.span(std.os.argv[pos]));
+            try wasm_files.append(iterator.next().?);
         }
     }
 
-    var engine = runtime.Engine.new(allocator, verbose);
+    var engine = runtime.Engine.new(gpa, init.io, verbose);
     for (wasm_files.items) |file| {
         const inst = try engine.loadModuleFromPath(file, file);
         if (verbose) {
@@ -47,7 +46,7 @@ pub fn main() !void {
     }
     if (func_name) |func| {
         const return_values = try engine.invokeFunctionByName(func, wasm_args.items);
-        defer allocator.free(return_values);
+        defer gpa.free(return_values);
         std.debug.print("=> {any}\n", .{return_values});
     } else if (wasm_files.items.len == 0) {
         std.debug.print("usage: file.wasm -v -r func -a arg1 -a arg2\n", .{});

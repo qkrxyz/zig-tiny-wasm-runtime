@@ -25,7 +25,7 @@ pub const Command = union(enum) {
     assert_uninstantiable: AssertUninstantiableCommandArg,
     assert_exception: AssertExceptionCommandArg,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             inline else => |val| if (@TypeOf(val) == void) {
                 try writer.print("{s}", .{@tagName(self)});
@@ -40,7 +40,7 @@ pub const Action = union(enum) {
     invoke: InvokeCommandArg,
     get: GetCommandArg,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             inline else => |val| {
                 try writer.print("{s}: {f}", .{ @tagName(self), val });
@@ -59,7 +59,7 @@ pub const Value = union(enum) {
     func_ref: ?FuncAddr,
     extern_ref: ?ExternAddr,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .i32 => |v| try writer.print("i32:{}", .{v}),
             .i64 => |v| try writer.print("i64:{}", .{v}),
@@ -91,7 +91,7 @@ pub const Result = union(enum) {
     // relaxed SIMD: (either (result1) (result2))
     either: []const Result,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             .either => |alts| {
                 try writer.print("either(", .{});
@@ -118,7 +118,7 @@ pub const ActionCommandArg = struct {
     line: u32,
     action: Action,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f} (line:{d})", .{ self.action, self.line });
     }
 };
@@ -134,7 +134,7 @@ pub const ModuleCommandArg = struct {
 
     pub const Kind = enum { normal, definition, instance };
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.name) |n| {
             _ = try writer.print("{s} (-> {s}) (line:{d})", .{ self.file_name, n, self.line });
         } else {
@@ -147,7 +147,7 @@ pub const RegisterCommandArg = struct {
     as_name: []const u8,
     name: ?[]const u8,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         if (self.name) |n| {
             _ = try writer.print("{s} {s}", .{ self.as_name, n });
         } else {
@@ -161,7 +161,7 @@ pub const AssertReturnCommandArg = struct {
     action: Action,
     expected: []const Result,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f} (-> {any}) (line:{d})", .{ self.action, self.expected, self.line });
     }
 };
@@ -172,7 +172,7 @@ pub const AssertTrapCommandArg = struct {
     error_text: []const u8, // Error string from test file
     module_data: ?[]const u8 = null, // WAT source for (assert_trap (module ...) "msg") form
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f} (-> \"{s}\") (line:{d})", .{ self.action, self.error_text, self.line });
     }
 };
@@ -182,7 +182,7 @@ pub const AssertExhaustionCommandArg = struct {
     action: Action,
     error_text: []const u8, // Error string from test file
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f} (-> \"{s}\") (line:{d})", .{ self.action, self.error_text, self.line });
     }
 };
@@ -194,7 +194,7 @@ pub const AssertMalformedCommandArg = struct {
     module_binary: ?[]const u8, // Binary data
     error_text: []const u8, // Error string from test file
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s} (-> \"{s}\") (line:{d})", .{ self.file_name, self.error_text, self.line });
     }
 };
@@ -206,7 +206,7 @@ pub const AssertInvalidCommandArg = struct {
     module_binary: ?[]const u8, // Binary data
     error_text: []const u8, // Error string from test file
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s} (-> \"{s}\") (line:{d})", .{ self.file_name, self.error_text, self.line });
     }
 };
@@ -217,7 +217,7 @@ pub const AssertUnlinkableCommandArg = struct {
     error_text: []const u8, // Error string from test file
     module_data: ?[]const u8 = null, // WAT source for module instantiation
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s} (-> \"{s}\") (line:{d})", .{ self.file_name, self.error_text, self.line });
     }
 };
@@ -226,7 +226,7 @@ pub const AssertExceptionCommandArg = struct {
     line: u32,
     action: Action,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{f} (line:{d})", .{ self.action, self.line });
     }
 };
@@ -237,7 +237,7 @@ pub const AssertUninstantiableCommandArg = struct {
     error_text: []const u8, // Error string from test file
     module_data: ?[]const u8 = null, // WAT source for module instantiation
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s} (-> \"{s}\") (line:{d})", .{ self.file_name, self.error_text, self.line });
     }
 };
@@ -248,7 +248,7 @@ pub const InvokeCommandArg = struct {
     args: []const Value, // Use spec_test.types.Value
     module: ?[]const u8,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s}", .{self.field});
 
         if (self.args.len > 0) {
@@ -265,7 +265,7 @@ pub const GetCommandArg = struct {
     field: []const u8,
     module: ?[]const u8,
 
-    pub fn format(self: @This(), writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         _ = try writer.print("{s}", .{self.field});
     }
 };

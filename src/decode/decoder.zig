@@ -30,7 +30,7 @@ pub const Decoder = struct {
             if (inst == .block or inst == .loop or inst == .@"if" or inst == .try_table) {
                 try nested_blocks.append(allocator, pos);
             } else if (inst == .@"else") {
-                const idx = nested_blocks.getLast();
+                const idx = nested_blocks.getLast().?;
                 try fillElse(&instArray.items[idx], pos);
             } else if (inst == .end) {
                 if (nested_blocks.items.len == 0)
