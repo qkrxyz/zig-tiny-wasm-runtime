@@ -251,7 +251,10 @@ pub const Context = struct {
     }
 
     pub fn checkRef(self: Self, idx: u32) Error!void {
-        if (idx >= self.refs.len) return Error.UndeclaredFunctionReference;
+        for (self.refs) |declared| {
+            if (declared == idx) return;
+        }
+        return Error.UndeclaredFunctionReference;
     }
 
     pub fn getLocal(self: Self, idx: LocalIdx) Error!ValueType {

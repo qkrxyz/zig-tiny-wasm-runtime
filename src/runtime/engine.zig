@@ -123,7 +123,9 @@ pub const Engine = struct {
     pub fn invokeFunctionByName(self: *Self, func_name: []const u8, args: []const Value) (Error || HostFunctionError || error{OutOfMemory})![]const Value {
         var it = self.mod_insts.valueIterator();
         while (it.next()) |mod_inst| {
-            const exp = try resolver.findExport(mod_inst.*.*, func_name);
+            const exp = resolver.findExport(mod_inst.*.*, func_name) catch continue;
+            if (exp != .function)
+                return Error.IncompatibleImportType;
             return try self.invokeFunctionByAddr(exp.function, args);
         }
         std.debug.print("Unknown function name to call: {s}\n", .{func_name});
